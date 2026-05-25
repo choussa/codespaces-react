@@ -1177,3 +1177,179 @@ body {
   background: #111113;
   opacity: .5;
 }
+
+/* ─── Storage Bar ─── */
+
+.storage-usage-text {
+  font-size: 13px;
+  color: #bbb;
+  font-family: 'Cascadia Mono', monospace;
+}
+
+.storage-bar-track {
+  height: 6px;
+  background: #111113;
+  border-radius: 3px;
+  overflow: hidden;
+  margin-bottom: 6px;
+}
+
+.storage-bar-fill {
+  height: 100%;
+  background: #3b82f6;
+  border-radius: 3px;
+  transition: width .3s ease;
+}
+
+.storage-bar-fill--warn {
+  background: #e87121;
+}
+
+.storage-warning {
+  font-size: 12px;
+  color: #e87121;
+}
+
+/* ─── Auth Messages ─── */
+
+.auth-message {
+  font-size: 13px;
+  color: #4ade80;
+  text-align: center;
+}
+
+.auth-forgot {
+  text-align: right;
+  margin-top: -4px;
+}
+.auth-forgot a {
+  font-size: 12px;
+  color: #60a5fa;
+  text-decoration: none;
+}
+.auth-forgot a:hover {
+  text-decoration: underline;
+}
+
+/* ─── Activity Bar User Menu ─── */
+
+.activity-user-menu {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
+}
+
+.activity-avatar {
+  width: 28px;
+  height: 28px;
+  border-radius: 50%;
+  background: #3b82f6;
+  color: #fff;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 12px;
+  font-weight: 700;
+  cursor: default;
+  flex-shrink: 0;
+}
+
+.activity-logout {
+  padding: 4px !important;
+  color: #666 !important;
+}
+.activity-logout:hover {
+  color: #f87171 !important;
+}
+
+/* ─── Dashboard User Menu ─── */
+
+.dashboard-user-menu {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+/* ─── Dashboard Search ─── */
+
+.dashboard-search {
+  position: relative;
+  display: flex;
+  align-items: center;
+}
+
+.dashboard-search-icon {
+  position: absolute;
+  left: 10px;
+  color: #555;
+  pointer-events: none;
+}
+
+.dashboard-search-input {
+  width: 200px;
+  padding: 6px 10px 6px 32px;
+  background: #1b1b1e;
+  border: 1px solid #2a2a30;
+  border-radius: 6px;
+  font-size: 13px;
+  color: #ccc;
+  outline: none;
+  transition: border-color .15s;
+}
+.dashboard-search-input:focus {
+  border-color: #3b82f6;
+}
+.dashboard-search-input::placeholder {
+  color: #555;
+}
+
+/* ─── Dashboard Sort Direction ─── */
+
+.dashboard-sort-dir {
+  background: none;
+  border: none;
+  color: #666;
+  cursor: pointer;
+  padding: 2px 4px;
+  display: flex;
+  align-items: center;
+  border-radius: 3px;
+}
+.dashboard-sort-dir:hover {
+  color: #ccc;
+  background: #2a2a30;
+}
+
+/* ─── Project Card Delete Button ─── */
+
+.dashboard-card {
+  position: relative;
+}
+
+.dashboard-card-delete {
+  position: absolute;
+  top: 8px;
+  left: 8px;
+  width: 28px;
+  height: 28px;
+  border-radius: 6px;
+  background: rgba(0,0,0,.5);
+  border: 1px solid rgba(255,255,255,.1);
+  color: rgba(255,255,255,.5);
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  opacity: 0;
+  transition: opacity .15s, color .15s, border-color .15s;
+  z-index: 2;
+}
+.dashboard-card:hover .dashboard-card-delete {
+  opacity: 1;
+}
+.dashboard-card-delete:hover {
+  color: #f87171;
+  border-color: #f87171;
+  background: rgba(248,113,113,.15);
+}

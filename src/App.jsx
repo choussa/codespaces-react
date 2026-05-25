@@ -1,16 +1,19 @@
-import { useState, useEffect, useRef, useCallback } from 'react';
+import { useState, useEffect, useRef, useCallback, useMemo } from 'react';
 import { $typst } from '@myriaddreamin/typst.ts';
 import { EditorView, basicSetup } from 'codemirror';
 import { Compartment } from '@codemirror/state';
 import { markdown } from '@codemirror/lang-markdown';
 import { oneDark } from '@codemirror/theme-one-dark';
 import { lineNumbers, keymap } from '@codemirror/view';
+import { autocompletion, closeBrackets } from '@codemirror/autocomplete';
+import { indentOnInput } from '@codemirror/language';
+import { vim } from '@replit/codemirror-vim';
 import {
   Folder, Search, Map, PenTool, Settings, Globe, HelpCircle,
   ChevronRight, Cloud, MoreHorizontal, Minus, Plus, Square,
   Check, Type, Bold, Italic, Underline, Heading, List, ListOrdered,
   Sigma, Code, AtSign, MessageSquare, ChevronDown, FilePlus,
-  Trash2, ArrowLeft, Pencil
+  Trash2, ArrowLeft, Pencil, LogOut, User
 } from 'lucide-react';
 import DashboardView from './components/DashboardView';
 import DownloadDropdown from './components/DownloadDropdown';
@@ -56,6 +59,16 @@ const PAPER_W = 580;
 const PAPER_H = 780;
 const STORAGE_KEY_PROJECTS = 'typst-projects';
 const STORAGE_KEY_ACTIVE = 'typst-active-project';
+const MAX_STORAGE_BYTES = 104857600; // 100 MB
+
+function formatBytes(bytes) {
+  if (bytes === 0) return '0 B';
+  const k = 1024;
+  const sizes = ['B', 'KB', 'MB'];
+  const i = Math.floor(Math.log(bytes) / Math.log(k));
+  const val = bytes / Math.pow(k, i);
+  return (val < 10 ? val.toFixed(1) : Math.round(val)) + ' ' + sizes[i];
+}
 
 function useDebounce(value, delay) {
   const [debounced, setDebounced] = useState(value);
@@ -114,10 +127,16 @@ function EditorViewInner({
   showLineNumbers, setShowLineNumbers,
   writingDirection, setWritingDirection,
   ctrlSDisabled, setCtrlSDisabled,
+  vimMode, setVimMode,
   projectName, projectLocation, savedIndicator,
   onBack, onPersist, addFile, deleteFile, renameFile, dirtyFiles, onDeleteProject, exportFormat,
   getCursorInfo, getWordCount, extractOutline, gotoLine, activeSidebar, setActiveSidebar,
   debouncedCode,
+  totalStorageBytes,
+  maxStorageBytes,
+  formatBytes,
+  sessionEmail,
+  onLogout,
 }) {
   const [searchQuery, setSearchQuery] = useState('');
   const [searchResults, setSearchResults] = useState([]);
@@ -127,6 +146,7 @@ function EditorViewInner({
   const themeCompartment = useRef(new Compartment());
   const lineNumbersCompartment = useRef(new Compartment());
   const dirCompartment = useRef(new Compartment());
+  const vimCompartment = useRef(new Compartment());
   const previewBodyRef = useRef(null);
   const pinchRef = useRef(null);
 
@@ -194,6 +214,9 @@ function EditorViewInner({
         oneDark,
         updateListener,
         saveKeymap,
+        autocompletion(),
+        closeBrackets(),
+        indentOnInput(),
         themeCompartment.current.of(EditorView.theme({
           '&': { fontSize: editorFontSize + 'px' },
           '.cm-scroller': { fontFamily: editorFontFamily },
@@ -202,6 +225,7 @@ function EditorViewInner({
         dirCompartment.current.of(EditorView.theme({
           '&': { direction: writingDirection },
         })),
+        vimCompartment.current.of(vimMode ? vim() : []),
       ],
       parent: editorRef.current,
     });
@@ -262,6 +286,13 @@ function EditorViewInner({
       }))
     });
   }, [writingDirection]);
+
+  useEffect(() => {
+    if (!viewRef.current) return;
+    viewRef.current.dispatch({
+      effects: vimCompartment.current.reconfigure(vimMode ? vim() : [])
+    });
+  }, [vimMode]);
 
   useEffect(() => {
     if (!debouncedCode.trim()) {
@@ -380,21 +411,31 @@ function EditorViewInner({
     comment: () => insertAtCursor('/* comment */'),
   };
 
-  const exportSvg = () => {
-    if (!svg) return;
-    const blob = new Blob([svg], { type: 'image/svg+xml' });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement('a');
-    a.href = url;
-    a.download = `${currentFile.replace('.typ', '')}.svg`;
-    a.click();
-    URL.revokeObjectURL(url);
+  const exportSvg = async () => {
+    if (!code.trim()) return;
+    try {
+      setStatus('compiling');
+      setError('');
+      const result = await $typst.svg({ mainContent: code });
+      const blob = new Blob([result], { type: 'image/svg+xml' });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = `${currentFile.replace('.typ', '')}.svg`;
+      a.click();
+      URL.revokeObjectURL(url);
+      setStatus('ready');
+    } catch (e) {
+      setStatus('error');
+      setError('SVG export failed: ' + (e.message || String(e)));
+    }
   };
 
   const exportPdf = async () => {
     try {
       setStatus('compiling');
-      const result = await $typst.pdf({ mainContent: debouncedCode });
+      setError('');
+      const result = await $typst.pdf({ mainContent: code });
       const blob = new Blob([result], { type: 'application/pdf' });
       const url = URL.createObjectURL(blob);
       const a = document.createElement('a');
@@ -410,10 +451,14 @@ function EditorViewInner({
   };
 
   const exportPng = async () => {
-    if (!svg) return;
+    if (!code.trim()) return;
     try {
+      setStatus('compiling');
+      setError('');
+      const svgResult = await $typst.svg({ mainContent: code });
+      setStatus('ready');
       const container = document.createElement('div');
-      container.innerHTML = svg;
+      container.innerHTML = svgResult;
       const svgEl = container.querySelector('svg');
       if (!svgEl) return;
       const svgData = new XMLSerializer().serializeToString(svgEl);
@@ -440,6 +485,7 @@ function EditorViewInner({
       };
       img.src = url;
     } catch (e) {
+      setStatus('error');
       setError('PNG export failed: ' + (e.message || String(e)));
     }
   };
@@ -560,6 +606,30 @@ function EditorViewInner({
                   {!ctrlSDisabled && <Check size={12} />}
                 </div>
               </label>
+              <label className="sidebar-toggle" onClick={() => setVimMode(prev => !prev)}>
+                <span>Vim mode</span>
+                <div className={`checkbox ${vimMode ? 'checked' : ''}`}>
+                  {vimMode && <Check size={12} />}
+                </div>
+              </label>
+            </div>
+            <div className="sidebar-section">
+              <h3>Storage</h3>
+              <div className="sidebar-field">
+                <label>Usage</label>
+                <span className="storage-usage-text">
+                  {formatBytes(totalStorageBytes)} / {formatBytes(maxStorageBytes)}
+                </span>
+              </div>
+              <div className="storage-bar-track">
+                <div
+                  className={`storage-bar-fill${totalStorageBytes > maxStorageBytes * 0.8 ? ' storage-bar-fill--warn' : ''}`}
+                  style={{ width: Math.min(100, (totalStorageBytes / maxStorageBytes) * 100) + '%' }}
+                />
+              </div>
+              {totalStorageBytes > maxStorageBytes * 0.8 && (
+                <p className="storage-warning">Running low on storage</p>
+              )}
             </div>
             <div className="sidebar-section sidebar-delete">
               <button onClick={onDeleteProject}>
@@ -766,6 +836,16 @@ function EditorViewInner({
             ))}
           </div>
           <div className="activity-bar-bottom">
+            {sessionEmail && (
+              <div className="activity-user-menu">
+                <div className="activity-avatar" title={sessionEmail}>
+                  {sessionEmail[0].toUpperCase()}
+                </div>
+                <button className="activity-btn activity-logout" onClick={onLogout} title="Sign out">
+                  <LogOut size={16} />
+                </button>
+              </div>
+            )}
             <button className="activity-btn"><HelpCircle size={20} /></button>
             <div className="activity-brand">typst</div>
           </div>
@@ -851,11 +931,17 @@ function App() {
   const [session, setSession] = useState(null);
   const [appLoading, setAppLoading] = useState(true);
   const [needsAuth, setNeedsAuth] = useState(false);
+  const [vimMode, setVimMode] = useState(false);
 
   const [projects, setProjects] = useState({});
   const [files, setFiles] = useState({});
   const [currentFile, setCurrentFile] = useState('main.typ');
   const code = files[currentFile] || '';
+  const sessionEmail = session?.user?.email || '';
+  const totalStorageBytes = useMemo(
+    () => Object.values(files).reduce((s, c) => s + new Blob([c]).size, 0),
+    [files]
+  );
   const [status, setStatus] = useState('initializing');
   const [svg, setSvg] = useState('');
   const [error, setError] = useState('');
@@ -892,6 +978,8 @@ function App() {
 
   const debouncedCode = useDebounce(code, 500);
 
+  const realtimeChannelRef = useRef(null);
+
   useEffect(() => {
     async function init() {
       let loaded = null;
@@ -902,8 +990,53 @@ function App() {
         setSession(session);
         supabase.auth.onAuthStateChange((_event, session) => setSession(session));
 
+        // Handle password reset recovery
+        if (window.location.hash?.includes('type=recovery')) {
+          const newPassword = prompt('Enter your new password (min 6 characters):');
+          if (newPassword && newPassword.length >= 6) {
+            const { error } = await supabase.auth.updateUser({ password: newPassword });
+            if (error) {
+              alert('Password reset failed: ' + error.message);
+            } else {
+              alert('Password updated successfully!');
+            }
+          }
+          window.location.hash = '';
+        }
+
         if (session) {
           loaded = await loadProjectsFromSupabase();
+
+          // Set up real-time subscriptions
+          const channel = supabase.channel('project-changes');
+          channel.on('postgres_changes', {
+            event: '*',
+            schema: 'public',
+            table: 'projects',
+            filter: `user_id=eq.${session.user.id}`,
+          }, (payload) => {
+            if (payload.eventType === 'DELETE') {
+              setProjects(prev => {
+                const updated = { ...prev };
+                const name = Object.keys(updated).find(k =>
+                  updated[k]?.id === payload.old?.id
+                );
+                if (name) delete updated[name];
+                return updated;
+              });
+            }
+          });
+          channel.on('postgres_changes', {
+            event: '*',
+            schema: 'public',
+            table: 'project_files',
+          }, async (payload) => {
+            await loadProjectsFromSupabase().then(latest => {
+              if (latest) setProjects(prev => ({ ...prev, ...latest }));
+            });
+          });
+          channel.subscribe();
+          realtimeChannelRef.current = channel;
         } else {
           setNeedsAuth(true);
         }
@@ -926,6 +1059,10 @@ function App() {
       setAppLoading(false);
     }
     init();
+
+    return () => {
+      realtimeChannelRef.current?.unsubscribe();
+    };
   }, []);
 
   const persistProjects = useCallback((updated) => {
@@ -1062,6 +1199,11 @@ function App() {
   const addFile = useCallback(() => {
     const name = prompt('File name:', 'untitled.typ');
     if (!name) return;
+    const currentBytes = Object.values(files).reduce((s, c) => s + new Blob([c]).size, 0);
+    if (currentBytes >= MAX_STORAGE_BYTES) {
+      alert('Storage limit of ' + formatBytes(MAX_STORAGE_BYTES) + ' reached. Please delete some files first.');
+      return;
+    }
     setFiles(prev => {
       if (prev[name]) return prev;
       const updated = { ...prev, [name]: '' };
@@ -1139,6 +1281,15 @@ function App() {
     // handled inside EditorViewInner via outline
   }, []);
 
+  const handleLogout = useCallback(async () => {
+    await supabase.auth.signOut();
+    setSession(null);
+    setView('dashboard');
+    setActiveProject(null);
+    removeLocalActiveProject();
+    window.location.reload();
+  }, []);
+
   if (appLoading) {
     return (
       <div className="app-loading">
@@ -1165,6 +1316,8 @@ function App() {
         onOpenProject={openProject}
         onCreateProject={createProject}
         onDeleteProject={deleteProject}
+        sessionEmail={sessionEmail}
+        onLogout={handleLogout}
       />
     );
   }
@@ -1195,6 +1348,8 @@ function App() {
         setWritingDirection={setWritingDirection}
         ctrlSDisabled={ctrlSDisabled}
         setCtrlSDisabled={setCtrlSDisabled}
+        vimMode={vimMode}
+        setVimMode={setVimMode}
         projectName={projectName}
         projectLocation={projectLocation}
         savedIndicator={savedIndicator}
@@ -1213,6 +1368,11 @@ function App() {
         activeSidebar={activeSidebar}
         setActiveSidebar={setActiveSidebar}
         debouncedCode={debouncedCode}
+        totalStorageBytes={totalStorageBytes}
+        maxStorageBytes={MAX_STORAGE_BYTES}
+        formatBytes={formatBytes}
+        sessionEmail={sessionEmail}
+        onLogout={handleLogout}
       />
     </div>
   );

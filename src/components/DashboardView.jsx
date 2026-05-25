@@ -1,7 +1,7 @@
 import { useState } from 'react';
 import {
   Plus, Folder, Grid3x3, List, ChevronDown, Share2, Download,
-  GitBranch, FileText, Clock, SortDesc
+  GitBranch, FileText, Clock, SortDesc, Trash2, Search, ArrowUpDown, LogOut
 } from 'lucide-react';
 
 const THUMBNAIL_COLORS = ['#1e3a5f', '#3b1f4e', '#1f4a3a', '#4a2c1a', '#2a2a3a', '#3a1a2a'];
@@ -9,14 +9,21 @@ const THUMBNAIL_COLORS = ['#1e3a5f', '#3b1f4e', '#1f4a3a', '#4a2c1a', '#2a2a3a',
 function ProjectCard({ project, onClick, onDelete }) {
   const colorIdx = project.name.split('').reduce((a, c) => a + c.charCodeAt(0), 0) % THUMBNAIL_COLORS.length;
   return (
-    <div className="dashboard-card" onClick={() => onClick(project.name)}>
-      <div className="dashboard-card-thumb" style={{ background: THUMBNAIL_COLORS[colorIdx] }}>
+    <div className="dashboard-card">
+      <div className="dashboard-card-thumb" style={{ background: THUMBNAIL_COLORS[colorIdx] }} onClick={() => onClick(project.name)}>
         <span className="dashboard-card-tag">{project.location || 'personal'}</span>
         <div className="dashboard-card-preview">
           <FileText size={32} opacity={0.3} />
         </div>
+        <button
+          className="dashboard-card-delete"
+          onClick={e => { e.stopPropagation(); onDelete(project.name); }}
+          title="Delete project"
+        >
+          <Trash2 size={14} />
+        </button>
       </div>
-      <div className="dashboard-card-info">
+      <div className="dashboard-card-info" onClick={() => onClick(project.name)}>
         <span className="dashboard-card-name">{project.name}</span>
         <span className="dashboard-card-date">
           <Clock size={12} />
@@ -27,13 +34,26 @@ function ProjectCard({ project, onClick, onDelete }) {
   );
 }
 
-export default function DashboardView({ projects, onOpenProject, onCreateProject, onDeleteProject }) {
+export default function DashboardView({ projects, onOpenProject, onCreateProject, onDeleteProject, sessionEmail, onLogout }) {
   const [viewMode, setViewMode] = useState('grid');
   const [sortBy, setSortBy] = useState('modified');
+  const [sortDir, setSortDir] = useState('desc');
+  const [searchQuery, setSearchQuery] = useState('');
 
-  const sorted = Object.values(projects).sort((a, b) => {
-    if (sortBy === 'name') return a.name.localeCompare(b.name);
-    return (b.modified || '').localeCompare(a.modified || '');
+  const filtered = Object.values(projects).filter(p =>
+    !searchQuery || p.name.toLowerCase().includes(searchQuery.toLowerCase())
+  );
+
+  const sorted = [...filtered].sort((a, b) => {
+    let cmp = 0;
+    if (sortBy === 'name') {
+      cmp = a.name.localeCompare(b.name);
+    } else if (sortBy === 'created') {
+      cmp = (a.created || '').localeCompare(b.created || '');
+    } else {
+      cmp = (b.modified || '').localeCompare(a.modified || '');
+    }
+    return sortDir === 'desc' ? cmp : -cmp;
   });
 
   return (
@@ -57,15 +77,22 @@ export default function DashboardView({ projects, onOpenProject, onCreateProject
           </div>
         </div>
         <div className="dashboard-topnav-right">
+          {sessionEmail && (
+            <div className="dashboard-user-menu">
+              <div className="dashboard-avatar" title={sessionEmail}>
+                {sessionEmail[0].toUpperCase()}
+              </div>
+              <button className="dashboard-topnav-btn" onClick={onLogout} title="Sign out">
+                <LogOut size={14} />
+              </button>
+            </div>
+          )}
           <button className="dashboard-topnav-btn" title="Share">
             <Share2 size={16} />
           </button>
           <button className="dashboard-topnav-btn" title="Downloads">
             <Download size={16} />
           </button>
-          <div className="dashboard-avatar" title="User">
-            <span>b</span>
-          </div>
         </div>
       </div>
 
@@ -103,6 +130,16 @@ export default function DashboardView({ projects, onOpenProject, onCreateProject
             </button>
           </div>
           <div className="dashboard-toolbar-right">
+            <div className="dashboard-search">
+              <Search size={14} className="dashboard-search-icon" />
+              <input
+                type="text"
+                placeholder="Search projects..."
+                value={searchQuery}
+                onChange={e => setSearchQuery(e.target.value)}
+                className="dashboard-search-input"
+              />
+            </div>
             <div className="dashboard-view-toggle">
               <button
                 className={`view-toggle-btn ${viewMode === 'grid' ? 'active' : ''}`}
@@ -122,7 +159,11 @@ export default function DashboardView({ projects, onOpenProject, onCreateProject
               <select value={sortBy} onChange={e => setSortBy(e.target.value)}>
                 <option value="modified">last modified</option>
                 <option value="name">name</option>
+                <option value="created">created</option>
               </select>
+              <button className="dashboard-sort-dir" onClick={() => setSortDir(d => d === 'desc' ? 'asc' : 'desc')} title="Toggle sort direction">
+                <ArrowUpDown size={14} />
+              </button>
               <ChevronDown size={14} className="sort-chevron" />
             </div>
           </div>
@@ -137,6 +178,12 @@ export default function DashboardView({ projects, onOpenProject, onCreateProject
             <button className="dashboard-btn dashboard-btn--primary" onClick={() => onCreateProject()}>
               <Plus size={16} /> Create project
             </button>
+          </div>
+        ) : sorted.length === 0 ? (
+          <div className="dashboard-empty">
+            <Search size={48} />
+            <h3>No matching projects</h3>
+            <p>Try a different search term.</p>
           </div>
         ) : (
           <div className={`dashboard-grid ${viewMode === 'list' ? 'dashboard-list' : ''}`}>
