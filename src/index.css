@@ -277,6 +277,31 @@ body {
   border-radius: 4px; padding: 6px 8px; font-size: 13px; color: #fff; outline: none;
 }
 .sidebar-search-input:focus { border-color: #3b82f6; }
+
+.search-result {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  padding: 4px 0;
+  cursor: pointer;
+  font-size: 13px;
+  color: #bbb;
+  transition: color .15s;
+}
+.search-result:hover { color: #fff; }
+.search-result-line {
+  font-family: 'Cascadia Mono', monospace;
+  font-size: 11px;
+  color: #60a5fa;
+  flex-shrink: 0;
+  min-width: 32px;
+}
+.search-result-text {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: pre;
+}
+
 .sidebar-delete { padding-top: 16px; }
 .sidebar-delete button {
   border: 1px solid #e55353;
@@ -1051,4 +1076,104 @@ body {
   top: 0;
   background: #1b1b1e;
   z-index: 1;
+}
+
+/* ─── Auth Screen ─── */
+
+.auth-screen {
+  height: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: #111113;
+}
+
+.auth-card {
+  width: 360px;
+  padding: 32px;
+  background: #1b1b1e;
+  border: 1px solid #2a2a30;
+  border-radius: 12px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 24px;
+}
+
+.auth-card h2 {
+  font-size: 20px;
+  color: #fff;
+  font-weight: 600;
+}
+
+.auth-card form {
+  width: 100%;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.auth-card input {
+  width: 100%;
+  padding: 10px 12px;
+  background: #111113;
+  border: 1px solid #2a2a30;
+  border-radius: 6px;
+  font-size: 14px;
+  color: #fff;
+  outline: none;
+}
+
+.auth-card input:focus { border-color: #3b82f6; }
+
+.auth-card button {
+  width: 100%;
+  padding: 10px;
+  background: #3b82f6;
+  border: none;
+  border-radius: 6px;
+  color: #fff;
+  font-size: 14px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: background .15s;
+}
+
+.auth-card button:hover { background: #2563eb; }
+.auth-card button:disabled { opacity: .5; cursor: default; }
+
+.auth-error {
+  font-size: 13px;
+  color: #f87171;
+  text-align: center;
+}
+
+.auth-switch {
+  font-size: 13px;
+  color: #888;
+}
+
+.auth-switch a {
+  color: #60a5fa;
+  text-decoration: none;
+}
+
+.auth-switch a:hover { text-decoration: underline; }
+
+.auth-brand {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  color: #fff;
+  font-weight: 600;
+  font-size: 18px;
+}
+
+.app-loading {
+  height: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: #111113;
+  opacity: .5;
 }

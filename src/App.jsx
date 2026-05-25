@@ -14,6 +14,14 @@ import {
 } from 'lucide-react';
 import DashboardView from './components/DashboardView';
 import DownloadDropdown from './components/DownloadDropdown';
+import Auth from './components/Auth';
+import {
+  getLocalProjects, getLocalActiveProject, setLocalActiveProject, removeLocalActiveProject,
+  syncProjectsToSupabase, syncFileToSupabase, syncFileAddToSupabase,
+  syncFileDeleteToSupabase, syncFileRenameToSupabase, syncProjectDeleteToSupabase,
+  loadProjectsFromSupabase,
+} from './lib/storage';
+import { supabase, isSupabaseReady } from './lib/supabase';
 
 const DEFAULT_CODE = `= Hello, Typst!
 
@@ -104,16 +112,21 @@ function EditorViewInner({
   editorFontSize, setEditorFontSize,
   editorFontFamily, setEditorFontFamily,
   showLineNumbers, setShowLineNumbers,
+  writingDirection, setWritingDirection,
+  ctrlSDisabled, setCtrlSDisabled,
   projectName, projectLocation, savedIndicator,
   onBack, onPersist, addFile, deleteFile, renameFile, dirtyFiles, onDeleteProject, exportFormat,
   getCursorInfo, getWordCount, extractOutline, gotoLine, activeSidebar, setActiveSidebar,
   debouncedCode,
 }) {
+  const [searchQuery, setSearchQuery] = useState('');
+  const [searchResults, setSearchResults] = useState([]);
   const editorRef = useRef(null);
   const viewRef = useRef(null);
   const prevCodeRef = useRef('');
   const themeCompartment = useRef(new Compartment());
   const lineNumbersCompartment = useRef(new Compartment());
+  const dirCompartment = useRef(new Compartment());
   const previewBodyRef = useRef(null);
   const pinchRef = useRef(null);
 
@@ -126,6 +139,22 @@ function EditorViewInner({
 
   const persistRef = useRef(persist);
   useEffect(() => { persistRef.current = persist; }, [persist]);
+
+  const ctrlSDisabledRef = useRef(ctrlSDisabled);
+  useEffect(() => { ctrlSDisabledRef.current = ctrlSDisabled; }, [ctrlSDisabled]);
+
+  const handleGotoLine = useCallback((line) => {
+    const view = viewRef.current;
+    if (!view) return;
+    try {
+      const pos = view.state.doc.line(line);
+      view.dispatch({
+        selection: { anchor: pos.from },
+        scrollIntoView: true,
+      });
+      view.focus();
+    } catch {}
+  }, []);
 
   useEffect(() => {
     $typst.setCompilerInitOptions({
@@ -149,7 +178,11 @@ function EditorViewInner({
     const saveKeymap = keymap.of([
       {
         key: 'Mod-s',
-        run: () => { persistRef.current?.(); return true; },
+        run: () => {
+          if (ctrlSDisabledRef.current) return false;
+          persistRef.current?.();
+          return true;
+        },
       },
     ]);
 
@@ -166,6 +199,9 @@ function EditorViewInner({
           '.cm-scroller': { fontFamily: editorFontFamily },
         })),
         lineNumbersCompartment.current.of(showLineNumbers ? lineNumbers() : []),
+        dirCompartment.current.of(EditorView.theme({
+          '&': { direction: writingDirection },
+        })),
       ],
       parent: editorRef.current,
     });
@@ -188,6 +224,20 @@ function EditorViewInner({
   }, [currentFile]);
 
   useEffect(() => {
+    if (!searchQuery.trim()) { setSearchResults([]); return; }
+    const lines = code.split('\n');
+    const results = [];
+    const lower = searchQuery.toLowerCase();
+    for (let i = 0; i < lines.length; i++) {
+      const line = lines[i];
+      if (line.toLowerCase().includes(lower)) {
+        results.push({ line: i + 1, text: line });
+      }
+    }
+    setSearchResults(results);
+  }, [searchQuery, code]);
+
+  useEffect(() => {
     if (!viewRef.current) return;
     viewRef.current.dispatch({
       effects: themeCompartment.current.reconfigure(EditorView.theme({
@@ -203,6 +253,15 @@ function EditorViewInner({
       effects: lineNumbersCompartment.current.reconfigure(showLineNumbers ? lineNumbers() : [])
     });
   }, [showLineNumbers]);
+
+  useEffect(() => {
+    if (!viewRef.current) return;
+    viewRef.current.dispatch({
+      effects: dirCompartment.current.reconfigure(EditorView.theme({
+        '&': { direction: writingDirection },
+      }))
+    });
+  }, [writingDirection]);
 
   useEffect(() => {
     if (!debouncedCode.trim()) {
@@ -483,17 +542,23 @@ function EditorViewInner({
               <div className="sidebar-field">
                 <label>Writing direction</label>
                 <div className="dir-toggle">
-                  <button className="active"><MenuIconRight /></button>
-                  <button><MenuIconLeft /></button>
+                  <button className={writingDirection === 'ltr' ? 'active' : ''} onClick={() => setWritingDirection('ltr')}>
+                    <MenuIconRight />
+                  </button>
+                  <button className={writingDirection === 'rtl' ? 'active' : ''} onClick={() => setWritingDirection('rtl')}>
+                    <MenuIconLeft />
+                  </button>
                 </div>
               </div>
               <div className="sidebar-field sidebar-field--col">
                 <label>Font family</label>
                 <input type="text" value={editorFontFamily} onChange={e => setEditorFontFamily(e.target.value)} className="font-mono" />
               </div>
-              <label className="sidebar-toggle">
+              <label className="sidebar-toggle" onClick={() => setCtrlSDisabled(prev => !prev)}>
                 <span>Disable browser Ctrl-S shortcut</span>
-                <div className="checkbox checked"><Check size={12} /></div>
+                <div className={`checkbox ${ctrlSDisabled ? '' : 'checked'}`}>
+                  {!ctrlSDisabled && <Check size={12} />}
+                </div>
               </label>
             </div>
             <div className="sidebar-section sidebar-delete">
@@ -554,7 +619,24 @@ function EditorViewInner({
           </div>
           <div className="sidebar-body">
             <div className="sidebar-section">
-              <input type="text" placeholder="Search in project..." className="sidebar-search-input" />
+              <input
+                type="text"
+                placeholder="Search in current file..."
+                className="sidebar-search-input"
+                value={searchQuery}
+                onChange={e => setSearchQuery(e.target.value)}
+              />
+            </div>
+            <div className="sidebar-section">
+              {searchQuery.trim() && searchResults.length === 0 && (
+                <p className="sidebar-muted">No matches found.</p>
+              )}
+              {searchResults.map((r, i) => (
+                <div key={i} className="search-result" onClick={() => handleGotoLine(r.line)}>
+                  <span className="search-result-line">L{r.line}</span>
+                  <span className="search-result-text">{r.text}</span>
+                </div>
+              ))}
             </div>
           </div>
         </div>
@@ -569,7 +651,7 @@ function EditorViewInner({
           </div>
           <div className="sidebar-body">
             <div className="sidebar-section">
-              <OutlineView headings={headings} onNavigate={gotoLine} />
+              <OutlineView headings={headings} onNavigate={handleGotoLine} />
             </div>
           </div>
         </div>
@@ -766,15 +848,11 @@ function EditorViewInner({
 function App() {
   const [view, setView] = useState('dashboard');
   const [activeProject, setActiveProject] = useState(null);
+  const [session, setSession] = useState(null);
+  const [appLoading, setAppLoading] = useState(true);
+  const [needsAuth, setNeedsAuth] = useState(false);
 
-  const savedProjects = (() => {
-    try { return JSON.parse(localStorage.getItem(STORAGE_KEY_PROJECTS)) || {}; } catch { return {}; }
-  })();
-  const savedActive = (() => {
-    try { return localStorage.getItem(STORAGE_KEY_ACTIVE) || null; } catch { return null; }
-  })();
-
-  const [projects, setProjects] = useState(savedProjects);
+  const [projects, setProjects] = useState({});
   const [files, setFiles] = useState({});
   const [currentFile, setCurrentFile] = useState('main.typ');
   const code = files[currentFile] || '';
@@ -786,13 +864,14 @@ function App() {
   const [editorFontSize, setEditorFontSize] = useState(15);
   const [editorFontFamily, setEditorFontFamily] = useState('"Cascadia Mono", monospace');
   const [showLineNumbers, setShowLineNumbers] = useState(true);
+  const [writingDirection, setWritingDirection] = useState('ltr');
+  const [ctrlSDisabled, setCtrlSDisabled] = useState(false);
   const [projectName, setProjectName] = useState('');
   const [projectLocation, setProjectLocation] = useState('black');
   const [savedIndicator, setSavedIndicator] = useState(false);
   const savedTimeoutRef = useRef(null);
 
   const [dirtyFiles, setDirtyFiles] = useState({});
-  const [projectsInitialized, setProjectsInitialized] = useState(false);
 
   const handleEditorChange = useCallback((newCode) => {
     if (files[currentFile] === newCode) return;
@@ -805,22 +884,48 @@ function App() {
       files: { ...(stored[activeProject]?.files || {}), [currentFile]: newCode },
       currentFile,
       modified: new Date().toLocaleDateString(),
-      settings: { fontSize: editorFontSize, fontFamily: editorFontFamily, lineNumbers: showLineNumbers, zoom },
+      settings: { fontSize: editorFontSize, fontFamily: editorFontFamily, lineNumbers: showLineNumbers, zoom, writingDirection, ctrlSDisabled },
     };
     localStorage.setItem(STORAGE_KEY_PROJECTS, JSON.stringify(stored));
-  }, [currentFile, activeProject, files, projectLocation, editorFontSize, editorFontFamily, showLineNumbers, zoom]);
+    syncFileToSupabase(activeProject, currentFile, newCode);
+  }, [currentFile, activeProject, files, projectLocation, editorFontSize, editorFontFamily, showLineNumbers, zoom, writingDirection, ctrlSDisabled]);
 
   const debouncedCode = useDebounce(code, 500);
 
-  // Init: check for saved active project
   useEffect(() => {
-    if (projectsInitialized) return;
-    if (savedActive && projects[savedActive]) {
-      openProject(savedActive);
-    } else if (Object.keys(projects).length > 0) {
-      openProject(Object.keys(projects)[0]);
+    async function init() {
+      let loaded = null;
+      let activeName = null;
+
+      if (isSupabaseReady()) {
+        const { data: { session } } = await supabase.auth.getSession();
+        setSession(session);
+        supabase.auth.onAuthStateChange((_event, session) => setSession(session));
+
+        if (session) {
+          loaded = await loadProjectsFromSupabase();
+        } else {
+          setNeedsAuth(true);
+        }
+      }
+
+      // Fall back to localStorage if Supabase returned nothing
+      if (!loaded) {
+        loaded = getLocalProjects();
+        activeName = getLocalActiveProject();
+      }
+
+      setProjects(loaded);
+
+      if (activeName && loaded[activeName]) {
+        openProject(activeName);
+      } else if (Object.keys(loaded).length > 0) {
+        openProject(Object.keys(loaded)[0]);
+      }
+
+      setAppLoading(false);
     }
-    setProjectsInitialized(true);
+    init();
   }, []);
 
   const persistProjects = useCallback((updated) => {
@@ -839,6 +944,8 @@ function App() {
     setEditorFontSize(p.settings?.fontSize || 15);
     setEditorFontFamily(p.settings?.fontFamily || '"Cascadia Mono", monospace');
     setShowLineNumbers(p.settings?.lineNumbers !== false);
+    setWritingDirection(p.settings?.writingDirection || 'ltr');
+    setCtrlSDisabled(p.settings?.ctrlSDisabled || false);
     setZoom(p.settings?.zoom || 0.75);
     setDirtyFiles({});
     setSvg('');
@@ -846,7 +953,7 @@ function App() {
     setStatus('ready');
     setActiveSidebar('settings');
     setView('editor');
-    localStorage.setItem(STORAGE_KEY_ACTIVE, name);
+    setLocalActiveProject(name);
   }, [projects]);
 
   const saveProject = useCallback(() => {
@@ -863,18 +970,21 @@ function App() {
             fontSize: editorFontSize,
             fontFamily: editorFontFamily,
             lineNumbers: showLineNumbers,
+            writingDirection,
+            ctrlSDisabled,
             zoom,
           },
         },
       };
       localStorage.setItem(STORAGE_KEY_PROJECTS, JSON.stringify(updated));
+      syncProjectsToSupabase(updated);
       return updated;
     });
     setDirtyFiles({});
     setSavedIndicator(true);
     if (savedTimeoutRef.current) clearTimeout(savedTimeoutRef.current);
     savedTimeoutRef.current = setTimeout(() => setSavedIndicator(false), 1500);
-  }, [activeProject, currentFile, files, projectLocation, editorFontSize, editorFontFamily, showLineNumbers, zoom]);
+  }, [activeProject, currentFile, files, projectLocation, editorFontSize, editorFontFamily, showLineNumbers, zoom, writingDirection, ctrlSDisabled]);
 
   const createProject = useCallback((name) => {
     const n = name || `project-${Date.now()}`;
@@ -884,11 +994,12 @@ function App() {
       files: { 'main.typ': DEFAULT_CODE },
       currentFile: 'main.typ',
       modified: new Date().toLocaleDateString(),
-      settings: { fontSize: 15, fontFamily: '"Cascadia Mono", monospace', lineNumbers: true, zoom: 0.75 },
+      settings: { fontSize: 15, fontFamily: '"Cascadia Mono", monospace', lineNumbers: true, writingDirection: 'ltr', ctrlSDisabled: false, zoom: 0.75 },
     };
     setProjects(prev => {
       const updated = { ...prev, [n]: newProject };
       localStorage.setItem(STORAGE_KEY_PROJECTS, JSON.stringify(updated));
+      syncProjectsToSupabase(updated);
       return updated;
     });
     openProject(n);
@@ -899,6 +1010,7 @@ function App() {
       const updated = { ...prev };
       delete updated[name];
       localStorage.setItem(STORAGE_KEY_PROJECTS, JSON.stringify(updated));
+      syncProjectDeleteToSupabase(name);
       return updated;
     });
   }, []);
@@ -907,7 +1019,7 @@ function App() {
     saveProject();
     setView('dashboard');
     setActiveProject(null);
-    localStorage.removeItem(STORAGE_KEY_ACTIVE);
+    removeLocalActiveProject();
   }, [saveProject]);
 
   const renameFile = useCallback((oldName) => {
@@ -931,6 +1043,7 @@ function App() {
         modified: new Date().toLocaleDateString(),
       };
       localStorage.setItem(STORAGE_KEY_PROJECTS, JSON.stringify(stored));
+      syncFileRenameToSupabase(activeProject, oldName, newName);
       return updated;
     });
     if (oldName === currentFile) {
@@ -943,7 +1056,7 @@ function App() {
     deleteProject(projectName);
     setView('dashboard');
     setActiveProject(null);
-    localStorage.removeItem(STORAGE_KEY_ACTIVE);
+    removeLocalActiveProject();
   }, [deleteProject, projectName]);
 
   const addFile = useCallback(() => {
@@ -961,6 +1074,7 @@ function App() {
         modified: new Date().toLocaleDateString(),
       };
       localStorage.setItem(STORAGE_KEY_PROJECTS, JSON.stringify(stored));
+      syncFileAddToSupabase(activeProject, name);
       return updated;
     });
     setCurrentFile(name);
@@ -983,6 +1097,7 @@ function App() {
         modified: new Date().toLocaleDateString(),
       };
       localStorage.setItem(STORAGE_KEY_PROJECTS, JSON.stringify(stored));
+      syncFileDeleteToSupabase(activeProject, name);
       return updated;
     });
     setCurrentFile(prev => {
@@ -1024,6 +1139,25 @@ function App() {
     // handled inside EditorViewInner via outline
   }, []);
 
+  if (appLoading) {
+    return (
+      <div className="app-loading">
+        <div className="auth-brand">
+          <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+            <polyline points="4 7 4 4 20 4 20 7" />
+            <line x1="9" y1="20" x2="15" y2="20" />
+            <line x1="12" y1="4" x2="12" y2="20" />
+          </svg>
+          <span>Typst</span>
+        </div>
+      </div>
+    );
+  }
+
+  if (needsAuth && !session) {
+    return <Auth />;
+  }
+
   if (view === 'dashboard') {
     return (
       <DashboardView
@@ -1057,6 +1191,10 @@ function App() {
         setEditorFontFamily={setEditorFontFamily}
         showLineNumbers={showLineNumbers}
         setShowLineNumbers={setShowLineNumbers}
+        writingDirection={writingDirection}
+        setWritingDirection={setWritingDirection}
+        ctrlSDisabled={ctrlSDisabled}
+        setCtrlSDisabled={setCtrlSDisabled}
         projectName={projectName}
         projectLocation={projectLocation}
         savedIndicator={savedIndicator}
