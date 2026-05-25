@@ -8,6 +8,7 @@ import { lineNumbers, keymap } from '@codemirror/view';
 import { autocompletion, closeBrackets } from '@codemirror/autocomplete';
 import { indentOnInput } from '@codemirror/language';
 import { vim } from '@replit/codemirror-vim';
+import JSZip from 'jszip';
 import {
   Folder, Search, Map, PenTool, Settings, Globe, HelpCircle,
   ChevronRight, Cloud, MoreHorizontal, Minus, Plus, Square,
@@ -177,11 +178,12 @@ function EditorViewInner({
   }, []);
 
   useEffect(() => {
+    const base = import.meta.env.BASE_URL || '/';
     $typst.setCompilerInitOptions({
-      getModule: () => '/wasm/typst_ts_web_compiler_bg.wasm',
+      getModule: () => `${base}wasm/typst_ts_web_compiler_bg.wasm`,
     });
     $typst.setRendererInitOptions({
-      getModule: () => '/wasm/typst_ts_renderer_bg.wasm',
+      getModule: () => `${base}wasm/typst_ts_renderer_bg.wasm`,
     });
     setStatus('ready');
   }, [setStatus]);
@@ -490,15 +492,14 @@ function EditorViewInner({
     }
   };
 
-  const exportZip = () => {
-    const allContent = Object.entries(files)
-      .map(([name, content]) => `${name}:\n${content}`)
-      .join('\n---\n');
-    const blob = new Blob([allContent], { type: 'text/plain' });
+  const exportZip = async () => {
+    const zip = new JSZip();
+    Object.entries(files).forEach(([name, content]) => zip.file(name, content));
+    const blob = await zip.generateAsync({ type: 'blob' });
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
     a.href = url;
-    a.download = `${projectName}-files.txt`;
+    a.download = `${projectName}.zip`;
     a.click();
     URL.revokeObjectURL(url);
   };
