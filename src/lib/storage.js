@@ -30,16 +30,26 @@ async function getUserId() {
   return data?.session?.user?.id;
 }
 
-async function ensureProjectRow(projectName, projectData) {
-  const { data: existing } = await supabase
+async function getProjectRowByName(projectName, userIdParam) {
+  const userId = userIdParam || await getUserId();
+  if (!userId) return null;
+
+  const { data } = await supabase
     .from('projects')
     .select('id')
+    .eq('user_id', userId)
     .eq('name', projectName)
     .maybeSingle();
 
+  return data || null;
+}
+
+async function ensureProjectRow(projectName, projectData, userIdParam) {
+  const existing = await getProjectRowByName(projectName, userIdParam);
+
   if (existing) return existing.id;
 
-  const userId = await getUserId();
+  const userId = userIdParam || await getUserId();
   if (!userId) return null;
 
   const { data } = await supabase
@@ -64,7 +74,7 @@ export async function syncProjectsToSupabase(projects) {
     if (!userId) return;
 
     for (const [name, p] of Object.entries(projects)) {
-      const projectId = await ensureProjectRow(name, p);
+      const projectId = await ensureProjectRow(name, p, userId);
       if (!projectId) continue;
 
       await supabase.from('projects').update({
@@ -80,7 +90,7 @@ export async function syncProjectsToSupabase(projects) {
           name: fileName,
           content,
           updated_at: new Date().toISOString(),
-        }, { onConflict: 'project_id, name' });
+        }, { onConflict: 'project_id,name' });
       }
     }
   } catch (e) {
@@ -98,7 +108,7 @@ export async function syncFileToSupabase(projectName, fileName, content) {
       name: fileName,
       content,
       updated_at: new Date().toISOString(),
-    }, { onConflict: 'project_id, name' });
+    }, { onConflict: 'project_id,name' });
     await supabase.from('projects').update({
       updated_at: new Date().toISOString(),
     }).eq('id', projectId);
@@ -129,8 +139,7 @@ export async function syncFileAddToSupabase(projectName, fileName) {
 export async function syncFileDeleteToSupabase(projectName, fileName) {
   if (!isSupabaseReady()) return;
   try {
-    const { data: project } = await supabase
-      .from('projects').select('id').eq('name', projectName).maybeSingle();
+    const project = await getProjectRowByName(projectName);
     if (!project) return;
     await supabase.from('project_files').delete()
       .eq('project_id', project.id).eq('name', fileName);
@@ -145,8 +154,7 @@ export async function syncFileDeleteToSupabase(projectName, fileName) {
 export async function syncFileRenameToSupabase(projectName, oldName, newName) {
   if (!isSupabaseReady()) return;
   try {
-    const { data: project } = await supabase
-      .from('projects').select('id').eq('name', projectName).maybeSingle();
+    const project = await getProjectRowByName(projectName);
     if (!project) return;
     const { data: file } = await supabase
       .from('project_files').select('id, content')
@@ -167,7 +175,9 @@ export async function syncFileRenameToSupabase(projectName, oldName, newName) {
 export async function syncProjectDeleteToSupabase(projectName) {
   if (!isSupabaseReady()) return;
   try {
-    await supabase.from('projects').delete().eq('name', projectName);
+    const userId = await getUserId();
+    if (!userId) return;
+    await supabase.from('projects').delete().eq('user_id', userId).eq('name', projectName);
   } catch (e) {
     console.warn('Supabase project delete sync failed:', e.message);
   }
@@ -194,6 +204,8 @@ export async function loadProjectsFromSupabase() {
         name: p.name,
         location: p.location,
         currentFile: p.current_file,
+        createdAt: p.created_at,
+        updatedAt: p.updated_at,
         modified: new Date(p.updated_at).toLocaleDateString(),
         settings: p.settings,
         files: fileMap,

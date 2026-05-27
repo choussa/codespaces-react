@@ -14,7 +14,7 @@ import {
   ChevronRight, Cloud, MoreHorizontal, Minus, Plus, Square,
   Check, Type, Bold, Italic, Underline, Heading, List, ListOrdered,
   Sigma, Code, AtSign, MessageSquare, ChevronDown, FilePlus,
-  Trash2, ArrowLeft, Pencil, LogOut, User
+  Trash2, ArrowLeft, Pencil, LogOut, User, X
 } from 'lucide-react';
 import DashboardView from './components/DashboardView';
 import DownloadDropdown from './components/DownloadDropdown';
@@ -58,6 +58,11 @@ const ZOOM_MIN = 0.25;
 const ZOOM_MAX = 4;
 const PAPER_W = 580;
 const PAPER_H = 780;
+const PREVIEW_SIZES = [
+  { id: 'compact', label: 'Compact', hint: 'More editor space', value: 42 },
+  { id: 'balanced', label: 'Balanced', hint: 'Even split', value: 50 },
+  { id: 'wide', label: 'Wide', hint: 'More preview space', value: 62 },
+];
 const STORAGE_KEY_PROJECTS = 'typst-projects';
 const STORAGE_KEY_ACTIVE = 'typst-active-project';
 const MAX_STORAGE_BYTES = 104857600; // 100 MB
@@ -69,6 +74,33 @@ function formatBytes(bytes) {
   const i = Math.floor(Math.log(bytes) / Math.log(k));
   const val = bytes / Math.pow(k, i);
   return (val < 10 ? val.toFixed(1) : Math.round(val)) + ' ' + sizes[i];
+}
+
+function toTimestamp(value) {
+  const t = Date.parse(value || '');
+  return Number.isNaN(t) ? 0 : t;
+}
+
+function mergeProjectsByFreshness(localProjects, remoteProjects, activeProjectName, hasDirtyActiveProject) {
+  const merged = { ...localProjects };
+
+  for (const [name, remoteProject] of Object.entries(remoteProjects || {})) {
+    const localProject = localProjects[name];
+    if (!localProject) {
+      merged[name] = remoteProject;
+      continue;
+    }
+
+    if (hasDirtyActiveProject && name === activeProjectName) {
+      continue;
+    }
+
+    if (toTimestamp(remoteProject.updatedAt) >= toTimestamp(localProject.updatedAt)) {
+      merged[name] = remoteProject;
+    }
+  }
+
+  return merged;
 }
 
 function useDebounce(value, delay) {
@@ -119,6 +151,93 @@ function OutlineView({ headings, onNavigate }) {
   );
 }
 
+function AppDialog({ dialog, onCancel, onConfirm }) {
+  const [value, setValue] = useState(dialog.defaultValue || '');
+
+  useEffect(() => {
+    setValue(dialog.defaultValue || '');
+  }, [dialog.defaultValue, dialog.open]);
+
+  useEffect(() => {
+    if (!dialog.open) return;
+    const onKeyDown = (e) => {
+      if (e.key === 'Escape') onCancel();
+    };
+    window.addEventListener('keydown', onKeyDown);
+    return () => window.removeEventListener('keydown', onKeyDown);
+  }, [dialog.open, onCancel]);
+
+  if (!dialog.open) return null;
+
+  const isPrompt = dialog.kind === 'prompt';
+  const minLength = dialog.minLength || 0;
+  const canConfirm = !isPrompt || (dialog.required ? value.trim().length >= minLength : value.length === 0 || value.trim().length >= minLength);
+
+  return (
+    <div className="app-dialog-backdrop" role="presentation" onClick={onCancel}>
+      <div className="app-dialog" role="dialog" aria-modal="true" onClick={e => e.stopPropagation()}>
+        <div className="app-dialog-header">
+          <h3>{dialog.title}</h3>
+          <button className="app-dialog-close" onClick={onCancel} aria-label="Close dialog">
+            <X size={14} />
+          </button>
+        </div>
+        {dialog.message && <p className="app-dialog-message">{dialog.message}</p>}
+
+        {isPrompt && (
+          <form
+            onSubmit={e => {
+              e.preventDefault();
+              if (canConfirm) onConfirm(value.trim());
+            }}
+          >
+            <input
+              className="app-dialog-input"
+              type={dialog.secret ? 'password' : 'text'}
+              placeholder={dialog.placeholder || ''}
+              value={value}
+              onChange={e => setValue(e.target.value)}
+              minLength={minLength || undefined}
+              autoFocus
+            />
+            {minLength > 0 && <p className="app-dialog-hint">Minimum {minLength} characters</p>}
+            <div className="app-dialog-actions">
+              <button type="button" className="app-dialog-btn" onClick={onCancel}>{dialog.cancelLabel || 'Cancel'}</button>
+              <button type="submit" className={`app-dialog-btn app-dialog-btn--primary${dialog.danger ? ' app-dialog-btn--danger' : ''}`} disabled={!canConfirm}>
+                {dialog.confirmLabel || 'Confirm'}
+              </button>
+            </div>
+          </form>
+        )}
+
+        {!isPrompt && (
+          <div className="app-dialog-actions">
+            <button type="button" className="app-dialog-btn" onClick={onCancel}>{dialog.cancelLabel || 'Cancel'}</button>
+            <button type="button" className={`app-dialog-btn app-dialog-btn--primary${dialog.danger ? ' app-dialog-btn--danger' : ''}`} onClick={() => onConfirm(true)}>
+              {dialog.confirmLabel || 'Confirm'}
+            </button>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function ToastStack({ toasts, onDismiss }) {
+  return (
+    <div className="toast-stack" aria-live="polite" aria-atomic="true">
+      {toasts.map(toast => (
+        <div key={toast.id} className={`toast-item toast-item--${toast.tone}`}>
+          <span>{toast.message}</span>
+          <button className="toast-close" onClick={() => onDismiss(toast.id)} aria-label="Dismiss notification">
+            <X size={12} />
+          </button>
+        </div>
+      ))}
+    </div>
+  );
+}
+
 function EditorViewInner({
   files, currentFile, setCurrentFile, code, onCodeChange,
   status, setStatus, svg, setSvg, error, setError,
@@ -141,6 +260,9 @@ function EditorViewInner({
 }) {
   const [searchQuery, setSearchQuery] = useState('');
   const [searchResults, setSearchResults] = useState([]);
+  const [viewMenuOpen, setViewMenuOpen] = useState(false);
+  const [previewWidth, setPreviewWidth] = useState(PREVIEW_SIZES[1].value);
+  const [previewActive, setPreviewActive] = useState(false);
   const editorRef = useRef(null);
   const viewRef = useRef(null);
   const prevCodeRef = useRef('');
@@ -150,6 +272,8 @@ function EditorViewInner({
   const vimCompartment = useRef(new Compartment());
   const previewBodyRef = useRef(null);
   const pinchRef = useRef(null);
+  const dragRef = useRef(null);
+  const viewMenuRef = useRef(null);
 
   const persist = useCallback(() => {
     onPersist();
@@ -264,6 +388,65 @@ function EditorViewInner({
   }, [searchQuery, code]);
 
   useEffect(() => {
+    if (!viewMenuOpen) return;
+    const onDocClick = (e) => {
+      if (!viewMenuRef.current || viewMenuRef.current.contains(e.target)) return;
+      setViewMenuOpen(false);
+    };
+    document.addEventListener('mousedown', onDocClick);
+    return () => document.removeEventListener('mousedown', onDocClick);
+  }, [viewMenuOpen]);
+
+  useEffect(() => {
+    const onWheel = (e) => {
+      if (!e.ctrlKey) return;
+      e.preventDefault();
+      const previewEl = previewBodyRef.current;
+      const isPreview = previewEl && previewEl.contains(e.target);
+      if (!isPreview) return;
+      const dir = e.deltaY > 0 ? -1 : 1;
+      setZoom((prev) => {
+        const next = Math.max(ZOOM_MIN, Math.min(ZOOM_MAX, prev + dir * 0.1));
+        return Math.round(next * 100) / 100;
+      });
+    };
+
+    const onKeyDown = (e) => {
+      if (!(e.ctrlKey || e.metaKey)) return;
+      if (!['+', '-', '=', '0'].includes(e.key)) return;
+      e.preventDefault();
+      if (!previewActive) return;
+      if (e.key === '0') {
+        setZoom(1);
+        return;
+      }
+      if (e.key === '+' || e.key === '=') {
+        setZoom((z) => Math.min(ZOOM_MAX, z + ZOOM_STEP));
+        return;
+      }
+      if (e.key === '-') {
+        setZoom((z) => Math.max(ZOOM_MIN, z - ZOOM_STEP));
+      }
+    };
+
+    const onGesture = (e) => { e.preventDefault(); };
+
+    window.addEventListener('wheel', onWheel, { passive: false });
+    window.addEventListener('keydown', onKeyDown);
+    window.addEventListener('gesturestart', onGesture);
+    window.addEventListener('gesturechange', onGesture);
+    window.addEventListener('gestureend', onGesture);
+
+    return () => {
+      window.removeEventListener('wheel', onWheel);
+      window.removeEventListener('keydown', onKeyDown);
+      window.removeEventListener('gesturestart', onGesture);
+      window.removeEventListener('gesturechange', onGesture);
+      window.removeEventListener('gestureend', onGesture);
+    };
+  }, [previewActive, setZoom]);
+
+  useEffect(() => {
     if (!viewRef.current) return;
     viewRef.current.dispatch({
       effects: themeCompartment.current.reconfigure(EditorView.theme({
@@ -355,14 +538,48 @@ function EditorViewInner({
 
     const onTouchEnd = () => { pinchRef.current = null; };
 
+    const onMouseDown = (e) => {
+      if (e.button !== 0) return;
+      dragRef.current = {
+        startX: e.clientX,
+        startY: e.clientY,
+        scrollLeft: el.scrollLeft,
+        scrollTop: el.scrollTop,
+      };
+      el.classList.add('preview-body--grabbing');
+      el.style.userSelect = 'none';
+    };
+
+    const onMouseMove = (e) => {
+      if (!dragRef.current) return;
+      e.preventDefault();
+      const dx = e.clientX - dragRef.current.startX;
+      const dy = e.clientY - dragRef.current.startY;
+      el.scrollLeft = dragRef.current.scrollLeft - dx;
+      el.scrollTop = dragRef.current.scrollTop - dy;
+    };
+
+    const onMouseUp = () => {
+      if (!dragRef.current) return;
+      dragRef.current = null;
+      el.classList.remove('preview-body--grabbing');
+      el.style.userSelect = '';
+    };
+
     el.addEventListener('touchstart', onTouchStart, { passive: false });
     el.addEventListener('touchmove', onTouchMove, { passive: false });
     el.addEventListener('touchend', onTouchEnd);
+    el.addEventListener('mousedown', onMouseDown);
+    document.addEventListener('mousemove', onMouseMove);
+    document.addEventListener('mouseup', onMouseUp);
 
     return () => {
       el.removeEventListener('touchstart', onTouchStart);
       el.removeEventListener('touchmove', onTouchMove);
       el.removeEventListener('touchend', onTouchEnd);
+      el.removeEventListener('mousedown', onMouseDown);
+      document.removeEventListener('mousemove', onMouseMove);
+      document.removeEventListener('mouseup', onMouseUp);
     };
   }, [zoom, setZoom]);
 
@@ -780,10 +997,55 @@ function EditorViewInner({
             <span>Typst</span>
           </div>
           <div className="top-nav-menu">
-            <span>File</span>
-            <span>Edit</span>
-            <span>View</span>
-            <span>Help</span>
+            <button type="button" className="top-nav-menu-btn">File</button>
+            <button type="button" className="top-nav-menu-btn">Edit</button>
+            <div className={`top-nav-menu-item${viewMenuOpen ? ' active' : ''}`} ref={viewMenuRef}>
+              <button
+                type="button"
+                className="top-nav-menu-btn"
+                onClick={() => setViewMenuOpen((open) => !open)}
+              >
+                View
+              </button>
+              {viewMenuOpen && (
+                <div className="top-nav-dropdown">
+                  <div className="top-nav-dropdown-title">Preview width</div>
+                  {PREVIEW_SIZES.map((size) => (
+                    <button
+                      key={size.id}
+                      type="button"
+                      className={`top-nav-dropdown-item${previewWidth === size.value ? ' active' : ''}`}
+                      onClick={() => {
+                        setPreviewWidth(size.value);
+                        setViewMenuOpen(false);
+                      }}
+                    >
+                      <span>
+                        {size.label}
+                        <small>{size.hint}</small>
+                      </span>
+                      {previewWidth === size.value && <Check size={14} />}
+                    </button>
+                  ))}
+                  <div className="top-nav-dropdown-divider" />
+                  <button
+                    type="button"
+                    className="top-nav-dropdown-item"
+                    onClick={() => {
+                      setPreviewWidth(PREVIEW_SIZES[1].value);
+                      setZoom(1);
+                      setViewMenuOpen(false);
+                    }}
+                  >
+                    <span>
+                      Reset view
+                      <small>Restore balanced layout</small>
+                    </span>
+                  </button>
+                </div>
+              )}
+            </div>
+            <button type="button" className="top-nav-menu-btn">Help</button>
           </div>
         </div>
         <div className="top-nav-center">
@@ -814,7 +1076,7 @@ function EditorViewInner({
       )}
 
       {/* Main workspace */}
-      <div className="workspace">
+      <div className="workspace" style={{ '--preview-width': `${previewWidth}%` }}>
         {/* Activity Bar */}
         <div className="activity-bar">
           <div className="activity-bar-top">
@@ -887,7 +1149,15 @@ function EditorViewInner({
               <button className="preview-toolbar-btn"><MoreHorizontal size={16} /></button>
             </div>
           </div>
-          <div className={`preview-body${zoom > 1 ? ' preview-body--zoomed' : ''}`} ref={previewBodyRef}>
+          <div
+            className={`preview-body${zoom > 1 ? ' preview-body--zoomed' : ''}`}
+            ref={previewBodyRef}
+            tabIndex={0}
+            onPointerEnter={() => setPreviewActive(true)}
+            onPointerLeave={() => setPreviewActive(false)}
+            onFocus={() => setPreviewActive(true)}
+            onBlur={() => setPreviewActive(false)}
+          >
             {error && <pre className="preview-error">{error}</pre>}
             <div
               className="preview-paper-wrap"
@@ -959,9 +1229,25 @@ function App() {
   const savedTimeoutRef = useRef(null);
 
   const [dirtyFiles, setDirtyFiles] = useState({});
+  const projectsRef = useRef(projects);
+  const activeProjectRef = useRef(activeProject);
+  const dirtyFilesRef = useRef(dirtyFiles);
+
+  useEffect(() => {
+    projectsRef.current = projects;
+  }, [projects]);
+
+  useEffect(() => {
+    activeProjectRef.current = activeProject;
+  }, [activeProject]);
+
+  useEffect(() => {
+    dirtyFilesRef.current = dirtyFiles;
+  }, [dirtyFiles]);
 
   const handleEditorChange = useCallback((newCode) => {
     if (files[currentFile] === newCode) return;
+    const nowIso = new Date().toISOString();
     setFiles(prev => ({ ...prev, [currentFile]: newCode }));
     setDirtyFiles(prev => ({ ...prev, [currentFile]: true }));
     let stored = {};
@@ -971,6 +1257,7 @@ function App() {
       files: { ...(stored[activeProject]?.files || {}), [currentFile]: newCode },
       currentFile,
       modified: new Date().toLocaleDateString(),
+      updatedAt: nowIso,
       settings: { fontSize: editorFontSize, fontFamily: editorFontFamily, lineNumbers: showLineNumbers, zoom, writingDirection, ctrlSDisabled },
     };
     localStorage.setItem(STORAGE_KEY_PROJECTS, JSON.stringify(stored));
@@ -1010,6 +1297,43 @@ function App() {
 
           // Set up real-time subscriptions
           const channel = supabase.channel('project-changes');
+          const pullLatestProjects = async () => {
+            const latest = await loadProjectsFromSupabase();
+            if (!latest) return;
+
+            const activeName = activeProjectRef.current;
+            const hasDirtyActiveProject = Object.keys(dirtyFilesRef.current || {}).length > 0;
+            const localProjects = projectsRef.current;
+
+            const merged = mergeProjectsByFreshness(
+              localProjects,
+              latest,
+              activeName,
+              hasDirtyActiveProject
+            );
+
+            projectsRef.current = merged;
+            setProjects(merged);
+
+            if (!activeName || hasDirtyActiveProject) return;
+
+            const remoteActive = latest[activeName];
+            const localActive = localProjects[activeName];
+            if (!remoteActive) return;
+
+            if (toTimestamp(remoteActive.updatedAt) > toTimestamp(localActive?.updatedAt)) {
+              setFiles(remoteActive.files || { 'main.typ': '' });
+              setCurrentFile(remoteActive.currentFile || 'main.typ');
+              setProjectLocation(remoteActive.location || 'black');
+              setEditorFontSize(remoteActive.settings?.fontSize || 15);
+              setEditorFontFamily(remoteActive.settings?.fontFamily || '"Cascadia Mono", monospace');
+              setShowLineNumbers(remoteActive.settings?.lineNumbers !== false);
+              setWritingDirection(remoteActive.settings?.writingDirection || 'ltr');
+              setCtrlSDisabled(remoteActive.settings?.ctrlSDisabled || false);
+              setZoom(remoteActive.settings?.zoom || 0.75);
+            }
+          };
+
           channel.on('postgres_changes', {
             event: '*',
             schema: 'public',
@@ -1023,18 +1347,20 @@ function App() {
                   updated[k]?.id === payload.old?.id
                 );
                 if (name) delete updated[name];
+                projectsRef.current = updated;
                 return updated;
               });
+              return;
             }
+
+            pullLatestProjects();
           });
           channel.on('postgres_changes', {
             event: '*',
             schema: 'public',
             table: 'project_files',
-          }, async (payload) => {
-            await loadProjectsFromSupabase().then(latest => {
-              if (latest) setProjects(prev => ({ ...prev, ...latest }));
-            });
+          }, async () => {
+            await pullLatestProjects();
           });
           channel.subscribe();
           realtimeChannelRef.current = channel;
@@ -1095,6 +1421,7 @@ function App() {
   }, [projects]);
 
   const saveProject = useCallback(() => {
+    const nowIso = new Date().toISOString();
     setProjects(prev => {
       const updated = {
         ...prev,
@@ -1104,6 +1431,7 @@ function App() {
           currentFile,
           location: projectLocation,
           modified: new Date().toLocaleDateString(),
+          updatedAt: nowIso,
           settings: {
             fontSize: editorFontSize,
             fontFamily: editorFontFamily,
@@ -1115,6 +1443,7 @@ function App() {
         },
       };
       localStorage.setItem(STORAGE_KEY_PROJECTS, JSON.stringify(updated));
+      projectsRef.current = updated;
       syncProjectsToSupabase(updated);
       return updated;
     });
@@ -1126,17 +1455,21 @@ function App() {
 
   const createProject = useCallback((name) => {
     const n = name || `project-${Date.now()}`;
+    const nowIso = new Date().toISOString();
     const newProject = {
       name: n,
       location: 'black',
       files: { 'main.typ': DEFAULT_CODE },
       currentFile: 'main.typ',
+      createdAt: nowIso,
+      updatedAt: nowIso,
       modified: new Date().toLocaleDateString(),
       settings: { fontSize: 15, fontFamily: '"Cascadia Mono", monospace', lineNumbers: true, writingDirection: 'ltr', ctrlSDisabled: false, zoom: 0.75 },
     };
     setProjects(prev => {
       const updated = { ...prev, [n]: newProject };
       localStorage.setItem(STORAGE_KEY_PROJECTS, JSON.stringify(updated));
+      projectsRef.current = updated;
       syncProjectsToSupabase(updated);
       return updated;
     });
@@ -1148,6 +1481,7 @@ function App() {
       const updated = { ...prev };
       delete updated[name];
       localStorage.setItem(STORAGE_KEY_PROJECTS, JSON.stringify(updated));
+      projectsRef.current = updated;
       syncProjectDeleteToSupabase(name);
       return updated;
     });
@@ -1163,6 +1497,7 @@ function App() {
   const renameFile = useCallback((oldName) => {
     const newName = prompt('Rename file:', oldName);
     if (!newName || newName === oldName) return;
+    const nowIso = new Date().toISOString();
     setFiles(prev => {
       if (prev[newName]) {
         alert('A file with that name already exists.');
@@ -1179,6 +1514,7 @@ function App() {
         files: updated,
         currentFile: nextFile,
         modified: new Date().toLocaleDateString(),
+        updatedAt: nowIso,
       };
       localStorage.setItem(STORAGE_KEY_PROJECTS, JSON.stringify(stored));
       syncFileRenameToSupabase(activeProject, oldName, newName);
@@ -1200,6 +1536,7 @@ function App() {
   const addFile = useCallback(() => {
     const name = prompt('File name:', 'untitled.typ');
     if (!name) return;
+    const nowIso = new Date().toISOString();
     const currentBytes = Object.values(files).reduce((s, c) => s + new Blob([c]).size, 0);
     if (currentBytes >= MAX_STORAGE_BYTES) {
       alert('Storage limit of ' + formatBytes(MAX_STORAGE_BYTES) + ' reached. Please delete some files first.');
@@ -1215,6 +1552,7 @@ function App() {
         files: updated,
         currentFile: name,
         modified: new Date().toLocaleDateString(),
+        updatedAt: nowIso,
       };
       localStorage.setItem(STORAGE_KEY_PROJECTS, JSON.stringify(stored));
       syncFileAddToSupabase(activeProject, name);
@@ -1225,6 +1563,7 @@ function App() {
 
   const deleteFileCallback = useCallback((name) => {
     if (!confirm(`Delete "${name}"?`)) return;
+    const nowIso = new Date().toISOString();
     setFiles(prev => {
       const keys = Object.keys(prev);
       if (keys.length <= 1) return prev;
@@ -1238,6 +1577,7 @@ function App() {
         files: updated,
         currentFile: nextFile,
         modified: new Date().toLocaleDateString(),
+        updatedAt: nowIso,
       };
       localStorage.setItem(STORAGE_KEY_PROJECTS, JSON.stringify(stored));
       syncFileDeleteToSupabase(activeProject, name);
