@@ -1,16 +1,79 @@
 import { expect, test, vi, describe, beforeEach } from 'vitest';
-import { render, screen, fireEvent } from '@testing-library/react';
+import { render, screen, fireEvent, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
+import App from './App';
+import DashboardView from './components/DashboardView';
 
 // Mock heavy dependencies that don't work in jsdom
 vi.mock('@replit/codemirror-vim', () => ({ vim: () => [] }));
-vi.mock('codemirror', () => ({ EditorView: { theme: () => [] }, basicSetup: [] }));
-vi.mock('@codemirror/state', () => ({ Compartment: vi.fn(() => ({ of: () => [] })) }));
+vi.mock('codemirror', () => {
+  function makeDocState(text) {
+    const doc = String(text || '');
+    return {
+      doc: {
+        length: doc.length,
+        toString: () => doc,
+        line: (lineNumber) => {
+          const lines = doc.split('\n');
+          const safeLine = Math.max(1, Math.min(lineNumber, lines.length));
+          let from = 0;
+          for (let i = 0; i < safeLine - 1; i++) from += lines[i].length + 1;
+          const to = from + (lines[safeLine - 1]?.length || 0);
+          return { from, to, number: safeLine };
+        },
+        lineAt: (pos) => {
+          const safePos = Math.max(0, Math.min(pos, doc.length));
+          const before = doc.slice(0, safePos);
+          const lineNumber = before.split('\n').length;
+          const start = before.lastIndexOf('\n') + 1;
+          return { number: lineNumber, from: start };
+        },
+      },
+      selection: { main: { from: 0, to: 0, head: 0 } },
+      sliceDoc: (from, to) => doc.slice(from, to),
+    };
+  }
+
+  class EditorView {
+    static theme() { return []; }
+    static updateListener = { of: () => [] };
+
+    constructor({ doc = '', parent }) {
+      this.parent = parent;
+      this.state = makeDocState(doc);
+      if (parent) {
+        const node = document.createElement('div');
+        node.className = 'cm-editor';
+        parent.appendChild(node);
+      }
+    }
+
+    dispatch(transaction) {
+      if (transaction?.changes) {
+        const { from = 0, to = 0, insert = '' } = transaction.changes;
+        const current = this.state.doc.toString();
+        const next = current.slice(0, from) + insert + current.slice(to);
+        this.state = makeDocState(next);
+      }
+      if (transaction?.selection) {
+        const anchor = transaction.selection.anchor ?? 0;
+        this.state.selection = { main: { from: anchor, to: anchor, head: anchor } };
+      }
+    }
+
+    focus() {}
+    destroy() { if (this.parent) this.parent.innerHTML = ''; }
+  }
+
+  return { EditorView, basicSetup: [] };
+});
+vi.mock('@codemirror/state', () => ({ Compartment: vi.fn(() => ({ of: () => [], reconfigure: () => [] })) }));
 vi.mock('@codemirror/lang-markdown', () => ({ markdown: () => [] }));
 vi.mock('@codemirror/theme-one-dark', () => ({ oneDark: [] }));
-vi.mock('@codemirror/view', () => ({ lineNumbers: () => [], keymap: () => [] }));
+vi.mock('@codemirror/view', () => ({ lineNumbers: () => [], keymap: { of: () => [] } }));
 vi.mock('@codemirror/autocomplete', () => ({ autocompletion: () => [], closeBrackets: () => [] }));
 vi.mock('@codemirror/language', () => ({ indentOnInput: () => [] }));
+vi.mock('./lib/supabase', () => ({ supabase: null, isSupabaseReady: () => false }));
 vi.mock('@myriaddreamin/typst.ts', () => ({
   $typst: {
     setCompilerInitOptions: vi.fn(),
@@ -248,6 +311,33 @@ describe('sorting', () => {
   });
 });
 
+describe('Dashboard view modes', () => {
+  test('renders list rows when list view is selected', async () => {
+    const onOpenProject = vi.fn();
+    const onCreateProject = vi.fn();
+    const onDeleteProject = vi.fn();
+    const onStartFromGitLab = vi.fn();
+
+    const { container } = render(
+      <DashboardView
+        projects={{
+          alpha: { name: 'alpha', modified: 'today', location: 'personal' },
+        }}
+        onOpenProject={onOpenProject}
+        onCreateProject={onCreateProject}
+        onDeleteProject={onDeleteProject}
+        onStartFromGitLab={onStartFromGitLab}
+        sessionEmail={null}
+        onLogout={vi.fn()}
+      />
+    );
+
+    await userEvent.click(screen.getByRole('button', { name: /list view/i }));
+    expect(container.querySelector('.dashboard-list-row')).toBeTruthy();
+    expect(screen.getByText('alpha')).toBeTruthy();
+  });
+});
+
 describe('Auth component', () => {
   test('renders sign in form', async () => {
     const Auth = (await import('./components/Auth')).default;
@@ -268,5 +358,102 @@ describe('Auth component', () => {
     render(<Auth />);
     await userEvent.click(screen.getByText('Sign up'));
     expect(await screen.findByText('Create account')).toBeTruthy();
+  });
+});
+
+describe('App integration', () => {
+  beforeEach(() => {
+    localStorage.clear();
+    vi.clearAllMocks();
+  });
+
+  test('creates project from dashboard and stays on dashboard', async () => {
+    render(<App />);
+    expect(await screen.findByRole('heading', { name: /dashboard/i })).toBeTruthy();
+
+    await userEvent.click(screen.getByRole('button', { name: /create project/i }));
+
+    expect(await screen.findByRole('heading', { name: /create project/i })).toBeTruthy();
+    const nameInput = screen.getByPlaceholderText('project-name');
+    await userEvent.clear(nameInput);
+    await userEvent.type(nameInput, 'sample-project');
+    await userEvent.click(screen.getByRole('button', { name: /^create$/i }));
+
+    expect(await screen.findByRole('heading', { name: /dashboard/i })).toBeTruthy();
+    expect(await screen.findByText('sample-project')).toBeTruthy();
+  });
+
+  test('dashboard new folder action creates folder on dashboard', async () => {
+    render(<App />);
+    expect(await screen.findByRole('heading', { name: /dashboard/i })).toBeTruthy();
+
+    await userEvent.click(screen.getByRole('button', { name: /new folder/i }));
+
+    expect(await screen.findByRole('heading', { name: /create folder/i })).toBeTruthy();
+    const folderInput = screen.getByPlaceholderText('folder-name');
+    await userEvent.clear(folderInput);
+    await userEvent.type(folderInput, 'my-projects');
+    await userEvent.click(screen.getByRole('button', { name: /^create folder$/i }));
+
+    expect(await screen.findByRole('heading', { name: /dashboard/i })).toBeTruthy();
+    expect(await screen.findByText('my-projects')).toBeTruthy();
+  });
+
+  test('creates folder and nested file from files panel', async () => {
+    render(<App />);
+
+    await userEvent.click(await screen.findByRole('button', { name: /create project/i }));
+    const nameInput = await screen.findByPlaceholderText('project-name');
+    await userEvent.clear(nameInput);
+    await userEvent.type(nameInput, 'files-project');
+    await userEvent.click(screen.getByRole('button', { name: /^create$/i }));
+
+    await userEvent.click(await screen.findByText('files-project'));
+    await userEvent.click(await screen.findByLabelText('Open files panel'));
+
+    await userEvent.click(screen.getByLabelText('Create folder'));
+    expect(await screen.findByRole('heading', { name: /create folder/i })).toBeTruthy();
+    const folderInput = screen.getByPlaceholderText('chapters');
+    await userEvent.clear(folderInput);
+    await userEvent.type(folderInput, 'chapters');
+    await userEvent.click(within(screen.getByRole('dialog')).getByRole('button', { name: /^create folder$/i }));
+
+    expect(await screen.findByText('chapters')).toBeTruthy();
+
+    await userEvent.click(screen.getByLabelText('Create file'));
+    expect(await screen.findByRole('heading', { name: /create file/i })).toBeTruthy();
+    const fileInput = screen.getByPlaceholderText('file.typ');
+    await userEvent.clear(fileInput);
+    await userEvent.type(fileInput, 'chapters/intro');
+    await userEvent.click(screen.getByRole('button', { name: /^create$/i }));
+
+    expect(await screen.findByText('intro.typ')).toBeTruthy();
+  });
+
+  test('adds file directly into an existing folder action', async () => {
+    render(<App />);
+
+    await userEvent.click(await screen.findByRole('button', { name: /create project/i }));
+    const nameInput = await screen.findByPlaceholderText('project-name');
+    await userEvent.clear(nameInput);
+    await userEvent.type(nameInput, 'appendix-project');
+    await userEvent.click(screen.getByRole('button', { name: /^create$/i }));
+
+    await userEvent.click(await screen.findByText('appendix-project'));
+    await userEvent.click(await screen.findByLabelText('Open files panel'));
+    await userEvent.click(await screen.findByLabelText('Create folder'));
+
+    let folderInput = await screen.findByPlaceholderText('chapters');
+    await userEvent.clear(folderInput);
+    await userEvent.type(folderInput, 'appendix');
+    await userEvent.click(within(screen.getByRole('dialog')).getByRole('button', { name: /^create folder$/i }));
+
+    await userEvent.click(await screen.findByLabelText('Create file in appendix'));
+    const fileInput = await screen.findByPlaceholderText('file.typ');
+    await userEvent.clear(fileInput);
+    await userEvent.type(fileInput, 'notes');
+    await userEvent.click(within(screen.getByRole('dialog')).getByRole('button', { name: /^create$/i }));
+
+    expect(await screen.findByText('notes.typ')).toBeTruthy();
   });
 });
