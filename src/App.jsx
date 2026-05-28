@@ -10,17 +10,18 @@ import { indentOnInput } from '@codemirror/language';
 import { vim } from '@replit/codemirror-vim';
 import JSZip from 'jszip';
 import {
-  Folder, Search, Map, PenTool, Settings, Globe, HelpCircle,
+  Folder, Search, Map as MapIcon, PenTool, Settings, Globe, HelpCircle,
   ChevronRight, Cloud, MoreHorizontal, Minus, Plus, Square,
   Check, Type, Bold, Italic, Underline, Heading, List, ListOrdered,
   Sigma, Code, AtSign, MessageSquare, ChevronDown, FilePlus,
-  Trash2, ArrowLeft, Pencil, LogOut, User, X
+  FolderPlus, FileText, Trash2, ArrowLeft, Pencil, LogOut, User, X
 } from 'lucide-react';
 import DashboardView from './components/DashboardView';
 import DownloadDropdown from './components/DownloadDropdown';
 import Auth from './components/Auth';
 import {
-  getLocalProjects, getLocalActiveProject, setLocalActiveProject, removeLocalActiveProject,
+  getLocalProjects, getLocalFolders, setLocalFolders,
+  getLocalActiveProject, setLocalActiveProject, removeLocalActiveProject,
   syncProjectsToSupabase, syncFileToSupabase, syncFileAddToSupabase,
   syncFileDeleteToSupabase, syncFileRenameToSupabase, syncProjectDeleteToSupabase,
   loadProjectsFromSupabase,
@@ -53,6 +54,8 @@ The sum $sum_(k=0)^n k$ is equal to $(n(n+1))/2$.
   *Conditional content* works too.
 ]`;
 
+const DASHBOARD_COLORS = ['#1e3a5f', '#3b1f4e', '#1f4a3a', '#4a2c1a', '#2a2a3a', '#3a1a2a'];
+
 const ZOOM_STEP = 0.25;
 const ZOOM_MIN = 0.25;
 const ZOOM_MAX = 4;
@@ -79,6 +82,128 @@ function formatBytes(bytes) {
 function toTimestamp(value) {
   const t = Date.parse(value || '');
   return Number.isNaN(t) ? 0 : t;
+}
+
+function normalizeProjectPath(raw) {
+  const source = typeof raw === 'string' ? raw : '';
+  return source
+    .trim()
+    .replace(/\\/g, '/')
+    .replace(/\/+/g, '/')
+    .replace(/^\/+|\/+$/g, '')
+    .split('/')
+    .map(part => part.trim())
+    .filter(Boolean)
+    .join('/');
+}
+
+function normalizeFilePath(raw) {
+  const normalized = normalizeProjectPath(raw);
+  if (!normalized) return '';
+  if (/\.[^/]+$/.test(normalized)) return normalized;
+  return `${normalized}.typ`;
+}
+
+function normalizeFolderPath(raw) {
+  return normalizeProjectPath(raw);
+}
+
+function getPaletteColor(name, palette) {
+  const colors = palette?.length ? palette : ['#1e3a5f'];
+  const base = typeof name === 'string' ? name : '';
+  const idx = base.split('').reduce((a, c) => a + c.charCodeAt(0), 0) % colors.length;
+  return colors[idx] || colors[0];
+}
+
+function getPathLabel(path) {
+  const parts = (path || '').split('/').filter(Boolean);
+  return parts[parts.length - 1] || path;
+}
+
+function getParentPath(path) {
+  const parts = (path || '').split('/').filter(Boolean);
+  if (parts.length <= 1) return '';
+  return parts.slice(0, -1).join('/');
+}
+
+function mergeFolderList(folderList, projectMap, palette) {
+  const map = new Map();
+  (folderList || []).forEach(folder => {
+    if (folder?.path) map.set(folder.path, folder);
+  });
+
+  let changed = false;
+  const nowIso = new Date().toISOString();
+  const addPath = (path) => {
+    if (!path || map.has(path)) return;
+    map.set(path, {
+      path,
+      name: getPathLabel(path),
+      color: getPaletteColor(path, palette),
+      createdAt: nowIso,
+      updatedAt: nowIso,
+    });
+    changed = true;
+  };
+
+  Object.values(projectMap || {}).forEach(project => {
+    const rawPath = project?.settings?.folderPath || '';
+    const folderPath = normalizeFolderPath(rawPath);
+    if (!folderPath) return;
+    const parts = folderPath.split('/').filter(Boolean);
+    for (let i = 0; i < parts.length; i++) {
+      addPath(parts.slice(0, i + 1).join('/'));
+    }
+  });
+
+  return { folders: Array.from(map.values()), changed };
+}
+
+function buildFileTree(fileMap) {
+  const root = { path: '', folders: new Map(), files: [] };
+
+  for (const filePath of Object.keys(fileMap || {}).sort((a, b) => a.localeCompare(b))) {
+    const parts = filePath.split('/').filter(Boolean);
+    if (!parts.length) continue;
+    let node = root;
+    for (let i = 0; i < parts.length - 1; i++) {
+      const folderName = parts[i];
+      const folderPath = parts.slice(0, i + 1).join('/');
+      if (!node.folders.has(folderName)) {
+        node.folders.set(folderName, { name: folderName, path: folderPath, folders: new Map(), files: [] });
+      }
+      node = node.folders.get(folderName);
+    }
+    node.files.push({ name: parts[parts.length - 1], path: filePath });
+  }
+
+  const toArrayNode = (node) => ({
+    path: node.path,
+    files: node.files.sort((a, b) => a.name.localeCompare(b.name)),
+    folders: Array.from(node.folders.values())
+      .sort((a, b) => a.name.localeCompare(b.name))
+      .map(toArrayNode),
+  });
+
+  return toArrayNode(root);
+}
+
+function getUniqueFilePath(fileMap, desiredPath) {
+  if (!fileMap[desiredPath]) return desiredPath;
+  const slash = desiredPath.lastIndexOf('/');
+  const dir = slash >= 0 ? desiredPath.slice(0, slash) : '';
+  const file = slash >= 0 ? desiredPath.slice(slash + 1) : desiredPath;
+  const extIndex = file.lastIndexOf('.');
+  const base = extIndex > 0 ? file.slice(0, extIndex) : file;
+  const ext = extIndex > 0 ? file.slice(extIndex) : '';
+
+  let i = 2;
+  while (true) {
+    const nextFile = `${base}-${i}${ext}`;
+    const candidate = dir ? `${dir}/${nextFile}` : nextFile;
+    if (!fileMap[candidate]) return candidate;
+    i += 1;
+  }
 }
 
 function mergeProjectsByFreshness(localProjects, remoteProjects, activeProjectName, hasDirtyActiveProject) {
@@ -249,7 +374,7 @@ function EditorViewInner({
   ctrlSDisabled, setCtrlSDisabled,
   vimMode, setVimMode,
   projectName, projectLocation, savedIndicator,
-  onBack, onPersist, addFile, deleteFile, renameFile, dirtyFiles, onDeleteProject, exportFormat,
+  onBack, onPersist, addFile, addFolder, deleteFile, renameFile, dirtyFiles, onDeleteProject, exportFormat,
   getCursorInfo, getWordCount, extractOutline, gotoLine, activeSidebar, setActiveSidebar,
   debouncedCode,
   totalStorageBytes,
@@ -263,6 +388,7 @@ function EditorViewInner({
   const [viewMenuOpen, setViewMenuOpen] = useState(false);
   const [previewWidth, setPreviewWidth] = useState(PREVIEW_SIZES[1].value);
   const [previewActive, setPreviewActive] = useState(false);
+  const [expandedFolders, setExpandedFolders] = useState({});
   const editorRef = useRef(null);
   const viewRef = useRef(null);
   const prevCodeRef = useRef('');
@@ -300,6 +426,16 @@ function EditorViewInner({
       view.focus();
     } catch {}
   }, []);
+
+  useEffect(() => {
+    const parts = currentFile.split('/').filter(Boolean);
+    if (parts.length <= 1) return;
+    const next = {};
+    for (let i = 0; i < parts.length - 1; i++) {
+      next[parts.slice(0, i + 1).join('/')] = true;
+    }
+    setExpandedFolders(prev => ({ ...prev, ...next }));
+  }, [currentFile]);
 
   useEffect(() => {
     const base = import.meta.env.BASE_URL || '/';
@@ -746,6 +882,77 @@ function EditorViewInner({
     { icon: MessageSquare, action: 'comment' },
   ];
 
+  const fileTree = useMemo(() => buildFileTree(files), [files]);
+
+  const renderFolder = (folder, depth = 0) => {
+    const isOpen = expandedFolders[folder.path] !== false;
+    return (
+      <div key={folder.path || 'root'} className="sidebar-tree-node">
+        {!!folder.path && (
+          <div className="sidebar-tree-folder-row" style={{ paddingLeft: `${depth * 14 + 6}px` }}>
+            <button
+              className="sidebar-tree-folder"
+              onClick={() => setExpandedFolders(prev => ({ ...prev, [folder.path]: !isOpen }))}
+              type="button"
+              aria-label={`Toggle folder ${getPathLabel(folder.path)}`}
+              aria-expanded={isOpen}
+            >
+              <ChevronDown size={12} className={`sidebar-tree-chevron${isOpen ? '' : ' sidebar-tree-chevron--closed'}`} />
+              <Folder size={13} />
+              <span>{getPathLabel(folder.path)}</span>
+            </button>
+            <div className="sidebar-folder-actions">
+              <button
+                className="sidebar-file-btn"
+                onClick={() => addFile(folder.path)}
+                title="New file in folder"
+                type="button"
+                aria-label={`Create file in ${getPathLabel(folder.path)}`}
+              >
+                <FilePlus size={12} />
+              </button>
+            </div>
+          </div>
+        )}
+
+        {(isOpen || !folder.path) && (
+          <>
+            {folder.folders.map(child => renderFolder(child, depth + (folder.path ? 1 : 0)))}
+            {folder.files.map(file => (
+              <div
+                key={file.path}
+                className={`sidebar-tree-file-row${currentFile === file.path ? ' active' : ''}`}
+                style={{ paddingLeft: `${(depth + 1) * 14 + 16}px` }}
+              >
+                <button
+                  className="sidebar-tree-file"
+                  onClick={() => setCurrentFile(file.path)}
+                  title={file.path}
+                >
+                  {dirtyFiles[file.path] && <span className="file-dirty-dot" />}
+                  <FileText size={12} />
+                  <span>{file.name}</span>
+                </button>
+                <div className="sidebar-file-actions">
+                  {Object.keys(files).length > 1 && (
+                    <button className="sidebar-file-btn" onClick={() => renameFile(file.path)} title="Rename file" type="button" aria-label={`Rename ${file.path}`}>
+                      <Pencil size={12} />
+                    </button>
+                  )}
+                  {Object.keys(files).length > 1 && (
+                    <button className="sidebar-file-btn sidebar-file-del" onClick={() => deleteFile(file.path)} title="Delete file" type="button" aria-label={`Delete ${file.path}`}>
+                      <Trash2 size={12} />
+                    </button>
+                  )}
+                </div>
+              </div>
+            ))}
+          </>
+        )}
+      </div>
+    );
+  };
+
   const renderSidebarContent = () => {
     if (activeSidebar === 'settings') {
       return (
@@ -763,7 +970,7 @@ function EditorViewInner({
               <div className="sidebar-field">
                 <label>Location</label>
                 <div className="select-wrap">
-                  <select value={projectLocation}>
+                  <select value={projectLocation} onChange={() => {}} aria-label="Project location" >
                     <option>black</option>
                     <option>white</option>
                   </select>
@@ -773,7 +980,7 @@ function EditorViewInner({
               <div className="sidebar-field">
                 <label>Compiler</label>
                 <div className="select-wrap">
-                  <select>
+                  <select onChange={() => {}} aria-label="Compiler version">
                     <option>Typst 0.14.1</option>
                   </select>
                   <ChevronDown className="select-chevron" size={16} />
@@ -850,7 +1057,7 @@ function EditorViewInner({
               )}
             </div>
             <div className="sidebar-section sidebar-delete">
-              <button onClick={onDeleteProject}>
+            <button onClick={onDeleteProject} type="button">
                 Delete project
               </button>
             </div>
@@ -864,29 +1071,33 @@ function EditorViewInner({
         <div className="sidebar-panel">
           <div className="sidebar-header sidebar-header--between">
             <h2>Files</h2>
-            <button className="sidebar-header-btn" onClick={addFile} title="New file">
-              <FilePlus size={16} />
-            </button>
+            <div className="sidebar-header-actions">
+              <button className="sidebar-header-btn" onClick={addFolder} title="New folder" type="button" aria-label="Create folder">
+                <FolderPlus size={16} />
+              </button>
+              <button className="sidebar-header-btn" onClick={() => addFile()} title="New file" type="button" aria-label="Create file">
+                <FilePlus size={16} />
+              </button>
+            </div>
           </div>
           <div className="sidebar-body">
             <div className="sidebar-section">
-              {Object.keys(files).map(name => (
-                <div key={name} className="sidebar-file-row">
-                  <span
-                    className={`sidebar-file ${currentFile === name ? 'active' : ''}`}
-                    onClick={() => setCurrentFile(name)}
-                  >
-                    {dirtyFiles[name] && <span className="file-dirty-dot" />}
-                    {name}
-                  </span>
+              {fileTree.folders.map(folder => renderFolder(folder, 0))}
+              {fileTree.files.map(file => (
+                <div key={file.path} className={`sidebar-tree-file-row${currentFile === file.path ? ' active' : ''}`} style={{ paddingLeft: '16px' }}>
+                  <button className="sidebar-tree-file" onClick={() => setCurrentFile(file.path)} title={file.path}>
+                    {dirtyFiles[file.path] && <span className="file-dirty-dot" />}
+                    <FileText size={12} />
+                    <span>{file.name}</span>
+                  </button>
                   <div className="sidebar-file-actions">
                     {Object.keys(files).length > 1 && (
-                      <button className="sidebar-file-btn" onClick={() => renameFile(name)} title="Rename file">
+                      <button className="sidebar-file-btn" onClick={() => renameFile(file.path)} title="Rename file" type="button" aria-label={`Rename ${file.path}`}>
                         <Pencil size={12} />
                       </button>
                     )}
                     {Object.keys(files).length > 1 && (
-                      <button className="sidebar-file-btn sidebar-file-del" onClick={() => deleteFile(name)} title="Delete file">
+                      <button className="sidebar-file-btn sidebar-file-del" onClick={() => deleteFile(file.path)} title="Delete file" type="button" aria-label={`Delete ${file.path}`}>
                         <Trash2 size={12} />
                       </button>
                     )}
@@ -992,10 +1203,10 @@ function EditorViewInner({
       {/* Top Navigation */}
       <div className="top-nav">
         <div className="top-nav-left">
-          <div className="top-nav-back" onClick={onBack}>
+          <button className="top-nav-back top-nav-back-btn" onClick={onBack} type="button" aria-label="Back to dashboard">
             <ChevronRight size={16} className="rotate-180" />
             <span>Typst</span>
-          </div>
+          </button>
           <div className="top-nav-menu">
             <button type="button" className="top-nav-menu-btn">File</button>
             <button type="button" className="top-nav-menu-btn">Edit</button>
@@ -1083,16 +1294,18 @@ function EditorViewInner({
             {[
               { id: 'files', icon: Folder },
               { id: 'search', icon: Search },
-              { id: 'outline', icon: Map },
+               { id: 'outline', icon: MapIcon },
               { id: 'pen', icon: PenTool, badge: 5 },
               { id: 'settings', icon: Settings },
               { id: 'globe', icon: Globe },
             ].map(item => (
-              <button
-                key={item.id}
-                className={`activity-btn ${activeSidebar === item.id ? 'active' : ''}`}
-                onClick={() => setActiveSidebar(activeSidebar === item.id ? null : item.id)}
-              >
+                <button
+                  key={item.id}
+                  className={`activity-btn ${activeSidebar === item.id ? 'active' : ''}`}
+                  onClick={() => setActiveSidebar(activeSidebar === item.id ? null : item.id)}
+                  type="button"
+                  aria-label={`Open ${item.id} panel`}
+                >
                 <item.icon size={20} />
                 {item.badge && <span className="activity-badge">{item.badge}</span>}
               </button>
@@ -1104,12 +1317,12 @@ function EditorViewInner({
                 <div className="activity-avatar" title={sessionEmail}>
                   {sessionEmail[0].toUpperCase()}
                 </div>
-                <button className="activity-btn activity-logout" onClick={onLogout} title="Sign out">
+                <button className="activity-btn activity-logout" onClick={onLogout} title="Sign out" type="button" aria-label="Sign out">
                   <LogOut size={16} />
                 </button>
               </div>
             )}
-            <button className="activity-btn"><HelpCircle size={20} /></button>
+            <button className="activity-btn" type="button" aria-label="Help"><HelpCircle size={20} /></button>
             <div className="activity-brand">typst</div>
           </div>
         </div>
@@ -1121,7 +1334,7 @@ function EditorViewInner({
         <div className="editor-pane">
           <div className="editor-toolbar">
             {toolbarButtons.map((btn, i) => (
-              <button key={i} className="editor-toolbar-btn" onClick={toolbarActions[btn.action]} title={btn.action}>
+              <button key={i} className="editor-toolbar-btn" onClick={toolbarActions[btn.action]} title={btn.action} type="button" aria-label={btn.action}>
                 <btn.icon size={16} />
               </button>
             ))}
@@ -1135,18 +1348,18 @@ function EditorViewInner({
         <div className="preview-pane">
           <div className="preview-toolbar">
             <div className="preview-toolbar-left">
-              <button className="preview-toolbar-btn"><ChevronRight size={16} className="rotate-180" /></button>
+              <button className="preview-toolbar-btn" type="button" aria-label="Collapse preview panel"><ChevronRight size={16} className="rotate-180" /></button>
             </div>
             <div className="preview-zoom">
-              <button onClick={() => setZoom(z => Math.max(ZOOM_MIN, z - ZOOM_STEP))}><Minus size={14} /></button>
+              <button onClick={() => setZoom(z => Math.max(ZOOM_MIN, z - ZOOM_STEP))} type="button" aria-label="Zoom out"><Minus size={14} /></button>
               <span>{Math.round(zoom * 100)}%</span>
-              <button onClick={() => setZoom(z => Math.min(ZOOM_MAX, z + ZOOM_STEP))}><Plus size={14} /></button>
+              <button onClick={() => setZoom(z => Math.min(ZOOM_MAX, z + ZOOM_STEP))} type="button" aria-label="Zoom in"><Plus size={14} /></button>
               <div className="preview-zoom-divider" />
-              <button onClick={() => setZoom(1)}><Square size={12} /></button>
+              <button onClick={() => setZoom(1)} type="button" aria-label="Reset zoom"><Square size={12} /></button>
             </div>
             <div className="preview-toolbar-right">
               <DownloadDropdown onExport={handleExport} disabled={!debouncedCode.trim()} />
-              <button className="preview-toolbar-btn"><MoreHorizontal size={16} /></button>
+              <button className="preview-toolbar-btn" type="button" aria-label="More preview actions"><MoreHorizontal size={16} /></button>
             </div>
           </div>
           <div
@@ -1225,11 +1438,21 @@ function App() {
   const [ctrlSDisabled, setCtrlSDisabled] = useState(false);
   const [projectName, setProjectName] = useState('');
   const [projectLocation, setProjectLocation] = useState('black');
+  const [projectFolderPath, setProjectFolderPath] = useState('');
+  const [projectAccentColor, setProjectAccentColor] = useState(DASHBOARD_COLORS[0]);
+  const [folders, setFolders] = useState([]);
+  const [dashboardFolderPath, setDashboardFolderPath] = useState('');
+  const [dashboardColor, setDashboardColor] = useState(DASHBOARD_COLORS[0]);
   const [savedIndicator, setSavedIndicator] = useState(false);
   const savedTimeoutRef = useRef(null);
+  const [dialog, setDialog] = useState({ open: false });
+  const dialogResolverRef = useRef(null);
+  const [toasts, setToasts] = useState([]);
+  const toastTimeoutsRef = useRef({});
 
   const [dirtyFiles, setDirtyFiles] = useState({});
   const projectsRef = useRef(projects);
+  const foldersRef = useRef(folders);
   const activeProjectRef = useRef(activeProject);
   const dirtyFilesRef = useRef(dirtyFiles);
 
@@ -1238,12 +1461,61 @@ function App() {
   }, [projects]);
 
   useEffect(() => {
+    foldersRef.current = folders;
+  }, [folders]);
+
+  useEffect(() => {
     activeProjectRef.current = activeProject;
   }, [activeProject]);
 
   useEffect(() => {
     dirtyFilesRef.current = dirtyFiles;
   }, [dirtyFiles]);
+
+  const dismissToast = useCallback((id) => {
+    if (toastTimeoutsRef.current[id]) {
+      clearTimeout(toastTimeoutsRef.current[id]);
+      delete toastTimeoutsRef.current[id];
+    }
+    setToasts(prev => prev.filter(t => t.id !== id));
+  }, []);
+
+  const showToast = useCallback((message, tone = 'info', timeout = 3200) => {
+    const id = `${Date.now()}-${Math.random().toString(16).slice(2)}`;
+    setToasts(prev => [...prev, { id, message, tone }]);
+    const timeoutId = setTimeout(() => {
+      dismissToast(id);
+    }, timeout);
+    toastTimeoutsRef.current[id] = timeoutId;
+  }, [dismissToast]);
+
+  useEffect(() => {
+    return () => {
+      Object.values(toastTimeoutsRef.current).forEach(clearTimeout);
+    };
+  }, []);
+
+  const closeDialog = useCallback((result) => {
+    if (dialogResolverRef.current) {
+      dialogResolverRef.current(result);
+      dialogResolverRef.current = null;
+    }
+    setDialog({ open: false });
+  }, []);
+
+  const openPromptDialog = useCallback((cfg) => {
+    return new Promise(resolve => {
+      dialogResolverRef.current = resolve;
+      setDialog({ ...cfg, kind: 'prompt', open: true });
+    });
+  }, []);
+
+  const openConfirmDialog = useCallback((cfg) => {
+    return new Promise(resolve => {
+      dialogResolverRef.current = resolve;
+      setDialog({ ...cfg, kind: 'confirm', open: true });
+    });
+  }, []);
 
   const handleEditorChange = useCallback((newCode) => {
     if (files[currentFile] === newCode) return;
@@ -1258,11 +1530,20 @@ function App() {
       currentFile,
       modified: new Date().toLocaleDateString(),
       updatedAt: nowIso,
-      settings: { fontSize: editorFontSize, fontFamily: editorFontFamily, lineNumbers: showLineNumbers, zoom, writingDirection, ctrlSDisabled },
+      settings: {
+        fontSize: editorFontSize,
+        fontFamily: editorFontFamily,
+        lineNumbers: showLineNumbers,
+        zoom,
+        writingDirection,
+        ctrlSDisabled,
+        accentColor: projectAccentColor,
+        folderPath: projectFolderPath,
+      },
     };
     localStorage.setItem(STORAGE_KEY_PROJECTS, JSON.stringify(stored));
     syncFileToSupabase(activeProject, currentFile, newCode);
-  }, [currentFile, activeProject, files, projectLocation, editorFontSize, editorFontFamily, showLineNumbers, zoom, writingDirection, ctrlSDisabled]);
+  }, [currentFile, activeProject, files, projectLocation, editorFontSize, editorFontFamily, showLineNumbers, zoom, writingDirection, ctrlSDisabled, projectAccentColor, projectFolderPath]);
 
   const debouncedCode = useDebounce(code, 500);
 
@@ -1280,13 +1561,22 @@ function App() {
 
         // Handle password reset recovery
         if (window.location.hash?.includes('type=recovery')) {
-          const newPassword = prompt('Enter your new password (min 6 characters):');
-          if (newPassword && newPassword.length >= 6) {
+          const newPassword = await openPromptDialog({
+            title: 'Set New Password',
+            message: 'Choose a new password to complete account recovery.',
+            placeholder: 'New password',
+            confirmLabel: 'Update Password',
+            cancelLabel: 'Skip',
+            minLength: 6,
+            required: true,
+            secret: true,
+          });
+          if (newPassword) {
             const { error } = await supabase.auth.updateUser({ password: newPassword });
             if (error) {
-              alert('Password reset failed: ' + error.message);
+              showToast('Password reset failed: ' + error.message, 'error', 5000);
             } else {
-              alert('Password updated successfully!');
+              showToast('Password updated successfully.', 'success');
             }
           }
           window.location.hash = '';
@@ -1325,6 +1615,8 @@ function App() {
               setFiles(remoteActive.files || { 'main.typ': '' });
               setCurrentFile(remoteActive.currentFile || 'main.typ');
               setProjectLocation(remoteActive.location || 'black');
+              setProjectAccentColor(remoteActive.settings?.accentColor || getPaletteColor(activeName, DASHBOARD_COLORS));
+              setProjectFolderPath(normalizeFolderPath(remoteActive.settings?.folderPath || ''));
               setEditorFontSize(remoteActive.settings?.fontSize || 15);
               setEditorFontFamily(remoteActive.settings?.fontFamily || '"Cascadia Mono", monospace');
               setShowLineNumbers(remoteActive.settings?.lineNumbers !== false);
@@ -1375,6 +1667,14 @@ function App() {
         activeName = getLocalActiveProject();
       }
 
+      const storedFolders = getLocalFolders();
+      const mergedFolderResult = mergeFolderList(storedFolders, loaded, DASHBOARD_COLORS);
+      setFolders(mergedFolderResult.folders);
+      foldersRef.current = mergedFolderResult.folders;
+      if (mergedFolderResult.changed || (storedFolders || []).length !== mergedFolderResult.folders.length) {
+        setLocalFolders(mergedFolderResult.folders);
+      }
+
       setProjects(loaded);
 
       if (activeName && loaded[activeName]) {
@@ -1390,21 +1690,23 @@ function App() {
     return () => {
       realtimeChannelRef.current?.unsubscribe();
     };
-  }, []);
+  }, [openPromptDialog, showToast]);
 
   const persistProjects = useCallback((updated) => {
     const projs = updated || projects;
     localStorage.setItem(STORAGE_KEY_PROJECTS, JSON.stringify(projs));
   }, [projects]);
 
-  const openProject = useCallback((name) => {
-    const p = projects[name];
+  const openProject = useCallback((name, projectOverride = null) => {
+    const p = projectOverride || projects[name];
     if (!p) return;
     setActiveProject(name);
     setFiles(p.files || { 'main.typ': '' });
     setCurrentFile(p.currentFile || 'main.typ');
     setProjectName(name);
     setProjectLocation(p.location || 'black');
+    setProjectAccentColor(p.settings?.accentColor || getPaletteColor(name, DASHBOARD_COLORS));
+    setProjectFolderPath(normalizeFolderPath(p.settings?.folderPath || ''));
     setEditorFontSize(p.settings?.fontSize || 15);
     setEditorFontFamily(p.settings?.fontFamily || '"Cascadia Mono", monospace');
     setShowLineNumbers(p.settings?.lineNumbers !== false);
@@ -1439,6 +1741,8 @@ function App() {
             writingDirection,
             ctrlSDisabled,
             zoom,
+            accentColor: projectAccentColor,
+            folderPath: projectFolderPath,
           },
         },
       };
@@ -1451,10 +1755,14 @@ function App() {
     setSavedIndicator(true);
     if (savedTimeoutRef.current) clearTimeout(savedTimeoutRef.current);
     savedTimeoutRef.current = setTimeout(() => setSavedIndicator(false), 1500);
-  }, [activeProject, currentFile, files, projectLocation, editorFontSize, editorFontFamily, showLineNumbers, zoom, writingDirection, ctrlSDisabled]);
+  }, [activeProject, currentFile, files, projectLocation, editorFontSize, editorFontFamily, showLineNumbers, zoom, writingDirection, ctrlSDisabled, projectAccentColor, projectFolderPath]);
 
-  const createProject = useCallback((name) => {
-    const n = name || `project-${Date.now()}`;
+  const createProject = useCallback((name, options = {}) => {
+    const n = typeof name === 'string' && name.trim()
+      ? name.trim()
+      : `project-${Date.now()}`;
+    const accentColor = options.accentColor || getPaletteColor(n, DASHBOARD_COLORS);
+    const folderPath = normalizeFolderPath(options.folderPath || '');
     const nowIso = new Date().toISOString();
     const newProject = {
       name: n,
@@ -1464,17 +1772,168 @@ function App() {
       createdAt: nowIso,
       updatedAt: nowIso,
       modified: new Date().toLocaleDateString(),
-      settings: { fontSize: 15, fontFamily: '"Cascadia Mono", monospace', lineNumbers: true, writingDirection: 'ltr', ctrlSDisabled: false, zoom: 0.75 },
+      settings: {
+        fontSize: 15,
+        fontFamily: '"Cascadia Mono", monospace',
+        lineNumbers: true,
+        writingDirection: 'ltr',
+        ctrlSDisabled: false,
+        zoom: 0.75,
+        accentColor,
+        folderPath,
+      },
     };
     setProjects(prev => {
       const updated = { ...prev, [n]: newProject };
       localStorage.setItem(STORAGE_KEY_PROJECTS, JSON.stringify(updated));
       projectsRef.current = updated;
       syncProjectsToSupabase(updated);
+      const merged = mergeFolderList(foldersRef.current, updated, DASHBOARD_COLORS);
+      if (merged.changed || (foldersRef.current || []).length !== merged.folders.length) {
+        setFolders(merged.folders);
+        setLocalFolders(merged.folders);
+        foldersRef.current = merged.folders;
+      }
       return updated;
     });
-    openProject(n);
+    if (options.open !== false) {
+      openProject(n, newProject);
+    }
+    return newProject;
   }, [openProject]);
+
+  const createProjectFromDashboard = useCallback(() => {
+    (async () => {
+      const defaultName = `project-${Date.now()}`;
+      const rawName = await openPromptDialog({
+        title: 'Create Project',
+        message: 'Name your project to add it to the dashboard.',
+        defaultValue: defaultName,
+        placeholder: 'project-name',
+        confirmLabel: 'Create',
+        cancelLabel: 'Cancel',
+        required: true,
+      });
+      const name = typeof rawName === 'string' ? rawName.trim() : '';
+      if (!name) return;
+      if (projectsRef.current[name]) {
+        showToast('A project with that name already exists.', 'error');
+        return;
+      }
+      createProject(name, { open: false, accentColor: dashboardColor, folderPath: dashboardFolderPath });
+      showToast(`Created project "${name}".`, 'success');
+    })();
+  }, [createProject, dashboardColor, dashboardFolderPath, openPromptDialog, showToast]);
+
+  const updateFolderStore = useCallback((nextFolders) => {
+    setFolders(nextFolders);
+    setLocalFolders(nextFolders);
+    foldersRef.current = nextFolders;
+  }, []);
+
+  const openDashboardFolder = useCallback((path) => {
+    setDashboardFolderPath(normalizeFolderPath(path));
+  }, []);
+
+  const goToDashboardParent = useCallback(() => {
+    setDashboardFolderPath(prev => getParentPath(prev));
+  }, []);
+
+  const createFolderFromDashboard = useCallback(() => {
+    (async () => {
+      const basePath = normalizeFolderPath(dashboardFolderPath);
+      const rawName = await openPromptDialog({
+        title: 'Create Folder',
+        message: basePath
+          ? `Create a subfolder in "${basePath}".`
+          : 'Create a new folder on the dashboard.',
+        defaultValue: 'New folder',
+        placeholder: 'folder-name',
+        confirmLabel: 'Create Folder',
+        cancelLabel: 'Cancel',
+        required: true,
+      });
+
+      const name = normalizeFolderPath(rawName);
+      if (!name) return;
+      const combinedPath = normalizeFolderPath(basePath ? `${basePath}/${name}` : name);
+      if (!combinedPath) return;
+
+      const existingPaths = new Set((foldersRef.current || []).map(folder => normalizeFolderPath(folder.path)));
+      if (existingPaths.has(combinedPath)) {
+        showToast('A folder with that name already exists.', 'error');
+        return;
+      }
+
+      const nowIso = new Date().toISOString();
+      const nextFolders = [...(foldersRef.current || [])];
+      const parts = combinedPath.split('/').filter(Boolean);
+      for (let i = 0; i < parts.length; i++) {
+        const path = parts.slice(0, i + 1).join('/');
+        if (existingPaths.has(path)) continue;
+        nextFolders.push({
+          path,
+          name: getPathLabel(path),
+          color: getPaletteColor(path, DASHBOARD_COLORS),
+          createdAt: nowIso,
+          updatedAt: nowIso,
+        });
+        existingPaths.add(path);
+      }
+
+      updateFolderStore(nextFolders);
+      showToast(`Created folder "${getPathLabel(combinedPath)}".`, 'success');
+    })();
+  }, [dashboardFolderPath, openPromptDialog, showToast, updateFolderStore]);
+
+  const moveProjectToFolder = useCallback((name, targetPath) => {
+    const normalizedTarget = normalizeFolderPath(targetPath);
+    setProjects(prev => {
+      const project = prev[name];
+      if (!project) return prev;
+      const currentPath = normalizeFolderPath(project.settings?.folderPath || '');
+      if (currentPath === normalizedTarget) return prev;
+      const updatedProject = {
+        ...project,
+        settings: { ...project.settings, folderPath: normalizedTarget },
+      };
+      const updated = { ...prev, [name]: updatedProject };
+      localStorage.setItem(STORAGE_KEY_PROJECTS, JSON.stringify(updated));
+      projectsRef.current = updated;
+      syncProjectsToSupabase(updated);
+
+      const merged = mergeFolderList(foldersRef.current, updated, DASHBOARD_COLORS);
+      if (merged.changed || (foldersRef.current || []).length !== merged.folders.length) {
+        updateFolderStore(merged.folders);
+      }
+
+      return updated;
+    });
+
+    if (activeProjectRef.current === name) {
+      setProjectFolderPath(normalizedTarget);
+    }
+  }, [updateFolderStore]);
+
+  const dashboardFolders = useMemo(() => {
+    const currentPath = normalizeFolderPath(dashboardFolderPath);
+    const prefix = currentPath ? `${currentPath}/` : '';
+    return (folders || []).filter(folder => {
+      const path = normalizeFolderPath(folder.path);
+      if (!path) return false;
+      if (!currentPath) return !path.includes('/');
+      if (!path.startsWith(prefix)) return false;
+      const rest = path.slice(prefix.length);
+      return rest && !rest.includes('/');
+    });
+  }, [folders, dashboardFolderPath]);
+
+  const dashboardProjects = useMemo(() => {
+    const currentPath = normalizeFolderPath(dashboardFolderPath);
+    return Object.values(projects).filter(project =>
+      normalizeFolderPath(project.settings?.folderPath || '') === currentPath
+    );
+  }, [projects, dashboardFolderPath]);
 
   const deleteProject = useCallback((name) => {
     setProjects(prev => {
@@ -1495,99 +1954,236 @@ function App() {
   }, [saveProject]);
 
   const renameFile = useCallback((oldName) => {
-    const newName = prompt('Rename file:', oldName);
-    if (!newName || newName === oldName) return;
-    const nowIso = new Date().toISOString();
-    setFiles(prev => {
-      if (prev[newName]) {
-        alert('A file with that name already exists.');
-        return prev;
+    (async () => {
+      const newName = await openPromptDialog({
+        title: 'Rename File',
+        message: `Rename ${oldName} to:`,
+        defaultValue: oldName,
+        placeholder: 'new-file.typ',
+        confirmLabel: 'Rename',
+        cancelLabel: 'Cancel',
+        required: true,
+      });
+      const normalizedNewName = normalizeFilePath(newName);
+      if (!normalizedNewName || normalizedNewName === oldName) return;
+      const nowIso = new Date().toISOString();
+      let duplicate = false;
+      setFiles(prev => {
+        if (prev[normalizedNewName]) {
+          duplicate = true;
+          return prev;
+        }
+        const updated = { ...prev };
+        updated[normalizedNewName] = prev[oldName];
+        delete updated[oldName];
+        let stored = {};
+        try { stored = JSON.parse(localStorage.getItem(STORAGE_KEY_PROJECTS)) || {}; } catch {}
+        const nextFile = oldName === currentFile ? normalizedNewName : currentFile;
+        stored[activeProject] = {
+          ...stored[activeProject],
+          files: updated,
+          currentFile: nextFile,
+          modified: new Date().toLocaleDateString(),
+          updatedAt: nowIso,
+        };
+        localStorage.setItem(STORAGE_KEY_PROJECTS, JSON.stringify(stored));
+        syncFileRenameToSupabase(activeProject, oldName, normalizedNewName);
+        return updated;
+      });
+      if (duplicate) {
+        showToast('A file with that name already exists.', 'error');
+        return;
       }
-      const updated = { ...prev };
-      updated[newName] = prev[oldName];
-      delete updated[oldName];
-      let stored = {};
-      try { stored = JSON.parse(localStorage.getItem(STORAGE_KEY_PROJECTS)) || {}; } catch {}
-      const nextFile = oldName === currentFile ? newName : currentFile;
-      stored[activeProject] = {
-        ...stored[activeProject],
-        files: updated,
-        currentFile: nextFile,
-        modified: new Date().toLocaleDateString(),
-        updatedAt: nowIso,
-      };
-      localStorage.setItem(STORAGE_KEY_PROJECTS, JSON.stringify(stored));
-      syncFileRenameToSupabase(activeProject, oldName, newName);
-      return updated;
-    });
-    if (oldName === currentFile) {
-      setCurrentFile(newName);
-    }
-  }, [files, currentFile, activeProject]);
+      if (oldName === currentFile) {
+        setCurrentFile(normalizedNewName);
+      }
+    })();
+  }, [currentFile, activeProject, openPromptDialog, showToast]);
 
   const handleDeleteProject = useCallback(() => {
-    if (!confirm(`Delete project "${projectName}"? This cannot be undone.`)) return;
-    deleteProject(projectName);
-    setView('dashboard');
-    setActiveProject(null);
-    removeLocalActiveProject();
-  }, [deleteProject, projectName]);
+    (async () => {
+      const confirmed = await openConfirmDialog({
+        title: 'Delete Project',
+        message: `Delete project "${projectName}"? This cannot be undone.`,
+        confirmLabel: 'Delete Project',
+        cancelLabel: 'Cancel',
+        danger: true,
+      });
+      if (!confirmed) return;
+      deleteProject(projectName);
+      setView('dashboard');
+      setActiveProject(null);
+      removeLocalActiveProject();
+      showToast(`Project "${projectName}" deleted.`, 'success');
+    })();
+  }, [deleteProject, projectName, openConfirmDialog, showToast]);
 
-  const addFile = useCallback(() => {
-    const name = prompt('File name:', 'untitled.typ');
-    if (!name) return;
-    const nowIso = new Date().toISOString();
-    const currentBytes = Object.values(files).reduce((s, c) => s + new Blob([c]).size, 0);
-    if (currentBytes >= MAX_STORAGE_BYTES) {
-      alert('Storage limit of ' + formatBytes(MAX_STORAGE_BYTES) + ' reached. Please delete some files first.');
-      return;
-    }
-    setFiles(prev => {
-      if (prev[name]) return prev;
-      const updated = { ...prev, [name]: '' };
+  const addFile = useCallback((folderPath = '') => {
+    (async () => {
+      const normalizedFolder = normalizeFolderPath(folderPath);
+      const defaultName = normalizedFolder ? `${normalizedFolder}/untitled.typ` : 'untitled.typ';
+      const rawName = await openPromptDialog({
+        title: 'Create File',
+        message: normalizedFolder
+          ? `Add a new file inside "${normalizedFolder}".`
+          : 'Add a new file to this project.',
+        defaultValue: defaultName,
+        placeholder: 'file.typ',
+        confirmLabel: 'Create',
+        cancelLabel: 'Cancel',
+        required: true,
+      });
+      let name = normalizeFilePath(rawName);
+      if (!name) return;
+      if (normalizedFolder && !name.startsWith(`${normalizedFolder}/`)) {
+        name = normalizeFilePath(`${normalizedFolder}/${getPathLabel(name)}`);
+      }
+      if (!name) return;
+      const nowIso = new Date().toISOString();
+      const currentBytes = Object.values(files).reduce((s, c) => s + new Blob([c]).size, 0);
+      if (currentBytes >= MAX_STORAGE_BYTES) {
+        showToast('Storage limit reached. Delete some files first.', 'error', 5000);
+        return;
+      }
+      let duplicate = false;
+      setFiles(prev => {
+        if (prev[name]) {
+          duplicate = true;
+          return prev;
+        }
+        const updated = { ...prev, [name]: '' };
+        let stored = {};
+        try { stored = JSON.parse(localStorage.getItem(STORAGE_KEY_PROJECTS)) || {}; } catch {}
+        stored[activeProject] = {
+          ...stored[activeProject],
+          files: updated,
+          currentFile: name,
+          modified: new Date().toLocaleDateString(),
+          updatedAt: nowIso,
+        };
+        localStorage.setItem(STORAGE_KEY_PROJECTS, JSON.stringify(stored));
+        syncFileAddToSupabase(activeProject, name);
+        return updated;
+      });
+      if (duplicate) {
+        showToast('A file with that name already exists.', 'error');
+        return;
+      }
+      setCurrentFile(name);
+    })();
+  }, [activeProject, files, openPromptDialog, showToast]);
+
+  const addFolder = useCallback(() => {
+    (async () => {
+      const rawFolder = await openPromptDialog({
+        title: 'Create Folder',
+        message: 'Create a folder to group existing files.',
+        defaultValue: 'sections',
+        placeholder: 'chapters',
+        confirmLabel: 'Create Folder',
+        cancelLabel: 'Cancel',
+        required: true,
+      });
+
+      const folder = normalizeFolderPath(rawFolder);
+      if (!folder) return;
+
+      const rootFiles = Object.keys(files).filter(name => !name.includes('/'));
+      if (rootFiles.length === 0) {
+        showToast('No root-level files to move. Create a file like "folder/name.typ" to populate the folder.', 'info');
+        return;
+      }
+
+      const nowIso = new Date().toISOString();
+      const updated = { ...files };
+      const renameMap = {};
+
+      rootFiles.forEach((oldPath) => {
+        const desired = `${folder}/${oldPath}`;
+        const unique = getUniqueFilePath(updated, desired);
+        renameMap[oldPath] = unique;
+        updated[unique] = updated[oldPath];
+        delete updated[oldPath];
+      });
+
+      const nextCurrentFile = renameMap[currentFile] || currentFile;
+
+      setFiles(updated);
+      setCurrentFile(nextCurrentFile);
+      setDirtyFiles(prev => {
+        const next = { ...prev };
+        Object.entries(renameMap).forEach(([oldName, newName]) => {
+          if (next[oldName]) {
+            next[newName] = next[oldName];
+            delete next[oldName];
+          }
+        });
+        return next;
+      });
+
       let stored = {};
       try { stored = JSON.parse(localStorage.getItem(STORAGE_KEY_PROJECTS)) || {}; } catch {}
       stored[activeProject] = {
         ...stored[activeProject],
         files: updated,
-        currentFile: name,
+        currentFile: nextCurrentFile,
         modified: new Date().toLocaleDateString(),
         updatedAt: nowIso,
       };
       localStorage.setItem(STORAGE_KEY_PROJECTS, JSON.stringify(stored));
-      syncFileAddToSupabase(activeProject, name);
-      return updated;
-    });
-    setCurrentFile(name);
-  }, [activeProject]);
+
+      Object.entries(renameMap).forEach(([oldName, newName]) => {
+        syncFileRenameToSupabase(activeProject, oldName, newName);
+      });
+
+      showToast(`Moved ${rootFiles.length} file${rootFiles.length === 1 ? '' : 's'} into "${folder}".`, 'success');
+    })();
+  }, [activeProject, currentFile, files, openPromptDialog, showToast]);
 
   const deleteFileCallback = useCallback((name) => {
-    if (!confirm(`Delete "${name}"?`)) return;
-    const nowIso = new Date().toISOString();
-    setFiles(prev => {
-      const keys = Object.keys(prev);
-      if (keys.length <= 1) return prev;
-      const updated = { ...prev };
-      delete updated[name];
-      let stored = {};
-      try { stored = JSON.parse(localStorage.getItem(STORAGE_KEY_PROJECTS)) || {}; } catch {}
-      const nextFile = name === currentFile ? keys.find(k => k !== name) || currentFile : currentFile;
-      stored[activeProject] = {
-        ...stored[activeProject],
-        files: updated,
-        currentFile: nextFile,
-        modified: new Date().toLocaleDateString(),
-        updatedAt: nowIso,
-      };
-      localStorage.setItem(STORAGE_KEY_PROJECTS, JSON.stringify(stored));
-      syncFileDeleteToSupabase(activeProject, name);
-      return updated;
-    });
-    setCurrentFile(prev => {
-      if (prev !== name) return prev;
-      return Object.keys(files).filter(k => k !== name)[0] || prev;
-    });
-  }, [files, currentFile, activeProject]);
+    (async () => {
+      const confirmed = await openConfirmDialog({
+        title: 'Delete File',
+        message: `Delete "${name}"?`,
+        confirmLabel: 'Delete File',
+        cancelLabel: 'Cancel',
+        danger: true,
+      });
+      if (!confirmed) return;
+      const nowIso = new Date().toISOString();
+      let blocked = false;
+      setFiles(prev => {
+        const keys = Object.keys(prev);
+        if (keys.length <= 1) {
+          blocked = true;
+          return prev;
+        }
+        const updated = { ...prev };
+        delete updated[name];
+        let stored = {};
+        try { stored = JSON.parse(localStorage.getItem(STORAGE_KEY_PROJECTS)) || {}; } catch {}
+        const nextFile = name === currentFile ? keys.find(k => k !== name) || currentFile : currentFile;
+        stored[activeProject] = {
+          ...stored[activeProject],
+          files: updated,
+          currentFile: nextFile,
+          modified: new Date().toLocaleDateString(),
+          updatedAt: nowIso,
+        };
+        localStorage.setItem(STORAGE_KEY_PROJECTS, JSON.stringify(stored));
+        syncFileDeleteToSupabase(activeProject, name);
+        return updated;
+      });
+      if (blocked) {
+        showToast('A project must have at least one file.', 'error');
+        return;
+      }
+      setCurrentFile(prev => {
+        if (prev !== name) return prev;
+        return Object.keys(files).filter(k => k !== name)[0] || prev;
+      });
+    })();
+  }, [files, currentFile, activeProject, openConfirmDialog, showToast]);
 
   const extractOutline = useCallback((source) => {
     if (!source) return [];
@@ -1631,8 +2227,10 @@ function App() {
     window.location.reload();
   }, []);
 
+  let content = null;
+
   if (appLoading) {
-    return (
+    content = (
       <div className="app-loading">
         <div className="auth-brand">
           <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
@@ -1644,78 +2242,97 @@ function App() {
         </div>
       </div>
     );
-  }
-
-  if (needsAuth && !session) {
-    return <Auth />;
-  }
-
-  if (view === 'dashboard') {
-    return (
+  } else if (needsAuth && !session) {
+    content = <Auth />;
+  } else if (view === 'dashboard') {
+    content = (
       <DashboardView
-        projects={projects}
+        projects={dashboardProjects}
+        folders={dashboardFolders}
+        currentFolderPath={dashboardFolderPath}
         onOpenProject={openProject}
-        onCreateProject={createProject}
+        onCreateProject={createProjectFromDashboard}
+        onCreateFolder={createFolderFromDashboard}
+        onOpenFolder={openDashboardFolder}
+        onMoveProjectToFolder={moveProjectToFolder}
+        onGoToParent={goToDashboardParent}
         onDeleteProject={deleteProject}
+        onStartFromGitLab={() => showToast('Start from GitLab is coming soon.', 'info')}
         sessionEmail={sessionEmail}
         onLogout={handleLogout}
+        colorOptions={DASHBOARD_COLORS}
+        selectedColor={dashboardColor}
+        onSelectColor={setDashboardColor}
       />
+    );
+  } else {
+    content = (
+      <div className="ide">
+        <EditorViewInner
+          files={files}
+          currentFile={currentFile}
+          setCurrentFile={setCurrentFile}
+          code={code}
+          onCodeChange={handleEditorChange}
+          status={status}
+          setStatus={setStatus}
+          svg={svg}
+          setSvg={setSvg}
+          error={error}
+          setError={setError}
+          zoom={zoom}
+          setZoom={setZoom}
+          editorFontSize={editorFontSize}
+          setEditorFontSize={setEditorFontSize}
+          editorFontFamily={editorFontFamily}
+          setEditorFontFamily={setEditorFontFamily}
+          showLineNumbers={showLineNumbers}
+          setShowLineNumbers={setShowLineNumbers}
+          writingDirection={writingDirection}
+          setWritingDirection={setWritingDirection}
+          ctrlSDisabled={ctrlSDisabled}
+          setCtrlSDisabled={setCtrlSDisabled}
+          vimMode={vimMode}
+          setVimMode={setVimMode}
+          projectName={projectName}
+          projectLocation={projectLocation}
+          savedIndicator={savedIndicator}
+          onBack={goToDashboard}
+          onPersist={saveProject}
+          addFile={addFile}
+          addFolder={addFolder}
+          deleteFile={deleteFileCallback}
+          renameFile={renameFile}
+          dirtyFiles={dirtyFiles}
+          onDeleteProject={handleDeleteProject}
+          exportFormat={null}
+          getCursorInfo={getCursorInfo}
+          getWordCount={getWordCount}
+          extractOutline={extractOutline}
+          gotoLine={gotoLine}
+          activeSidebar={activeSidebar}
+          setActiveSidebar={setActiveSidebar}
+          debouncedCode={debouncedCode}
+          totalStorageBytes={totalStorageBytes}
+          maxStorageBytes={MAX_STORAGE_BYTES}
+          formatBytes={formatBytes}
+          sessionEmail={sessionEmail}
+          onLogout={handleLogout}
+        />
+      </div>
     );
   }
 
   return (
-    <div className="ide">
-      <EditorViewInner
-        files={files}
-        currentFile={currentFile}
-        setCurrentFile={setCurrentFile}
-        code={code}
-        onCodeChange={handleEditorChange}
-        status={status}
-        setStatus={setStatus}
-        svg={svg}
-        setSvg={setSvg}
-        error={error}
-        setError={setError}
-        zoom={zoom}
-        setZoom={setZoom}
-        editorFontSize={editorFontSize}
-        setEditorFontSize={setEditorFontSize}
-        editorFontFamily={editorFontFamily}
-        setEditorFontFamily={setEditorFontFamily}
-        showLineNumbers={showLineNumbers}
-        setShowLineNumbers={setShowLineNumbers}
-        writingDirection={writingDirection}
-        setWritingDirection={setWritingDirection}
-        ctrlSDisabled={ctrlSDisabled}
-        setCtrlSDisabled={setCtrlSDisabled}
-        vimMode={vimMode}
-        setVimMode={setVimMode}
-        projectName={projectName}
-        projectLocation={projectLocation}
-        savedIndicator={savedIndicator}
-        onBack={goToDashboard}
-        onPersist={saveProject}
-        addFile={addFile}
-        deleteFile={deleteFileCallback}
-        renameFile={renameFile}
-        dirtyFiles={dirtyFiles}
-        onDeleteProject={handleDeleteProject}
-        exportFormat={null}
-        getCursorInfo={getCursorInfo}
-        getWordCount={getWordCount}
-        extractOutline={extractOutline}
-        gotoLine={gotoLine}
-        activeSidebar={activeSidebar}
-        setActiveSidebar={setActiveSidebar}
-        debouncedCode={debouncedCode}
-        totalStorageBytes={totalStorageBytes}
-        maxStorageBytes={MAX_STORAGE_BYTES}
-        formatBytes={formatBytes}
-        sessionEmail={sessionEmail}
-        onLogout={handleLogout}
+    <>
+      {content}
+      <AppDialog
+        dialog={dialog}
+        onCancel={() => closeDialog(null)}
+        onConfirm={closeDialog}
       />
-    </div>
+      <ToastStack toasts={toasts} onDismiss={dismissToast} />
+    </>
   );
 }
 

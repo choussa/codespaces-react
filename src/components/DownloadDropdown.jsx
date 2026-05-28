@@ -30,15 +30,21 @@ export default function DownloadDropdown({ onExport, disabled }) {
         onClick={() => setOpen(!open)}
         disabled={disabled}
         title="Download"
+        type="button"
+        aria-expanded={open}
+        aria-haspopup="menu"
+        aria-label="Open export menu"
       >
         <Download size={16} />
       </button>
       {open && (
-        <div className="download-dropdown-menu">
+        <div className="download-dropdown-menu" role="menu" aria-label="Export options">
           {ITEMS.map(item => (
             <button
               key={item.id}
               className="download-dropdown-item"
+              type="button"
+              role="menuitem"
               onClick={() => {
                 onExport(item.id);
                 setOpen(false);

@@ -4,7 +4,13 @@ logs
 npm-debug.log*
 yarn-debug.log*
 yarn-error.log*
-lerna-debug.log*
+
+# Screenshots / media
+folder-drag-files/
+ezgif-iframe-*
+ezgif-frame-*
+landing-page/
+
 
 # Diagnostic reports (https://nodejs.org/api/report.html)
 report.[0-9]*.[0-9]*.[0-9]*.[0-9]*.json

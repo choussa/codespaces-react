@@ -2,9 +2,18 @@ import { supabase, isSupabaseReady } from './supabase';
 
 const STORAGE_KEY_PROJECTS = 'typst-projects';
 const STORAGE_KEY_ACTIVE = 'typst-active-project';
+const STORAGE_KEY_FOLDERS = 'typst-folders';
 
 export function getLocalProjects() {
   try { return JSON.parse(localStorage.getItem(STORAGE_KEY_PROJECTS)) || {}; } catch { return {}; }
+}
+
+export function getLocalFolders() {
+  try { return JSON.parse(localStorage.getItem(STORAGE_KEY_FOLDERS)) || []; } catch { return []; }
+}
+
+export function setLocalFolders(folders) {
+  localStorage.setItem(STORAGE_KEY_FOLDERS, JSON.stringify(folders || []));
 }
 
 function setLocalProjects(projects) {
